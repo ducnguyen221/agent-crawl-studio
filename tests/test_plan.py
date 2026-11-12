@@ -10,7 +10,7 @@ import pytest
 from agent_crawl_studio import cli, config, errors, limits, runner, schema, urlpolicy
 
 PDF = "https://www.rfc-editor.org/rfc/rfc9309.pdf"
-PNG = "https://upload.wikimedia.org/wikipedia/commons/4/47/PNG_transparency_demonstration_1.png"
+PNG = "https://www.w3.org/Graphics/PNG/alphatest.png"
 NOT_FOUND = "https://www.rfc-editor.org/rfc/rfc99999.txt"
 BLOCKED_URLS = ["http://127.0.0.1/", "http://2130706433/", "https://localhost/", "ftp://example.com/x", "https://user:pw@example.com/"]
 GiB = 2 ** 30
