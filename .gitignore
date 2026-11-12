@@ -1,0 +1,40 @@
+# Secrets and credentials
+.env*
+!.env.example
+*.key
+*.pem
+*.credentials.json
+auth.json
+oauth_creds.json
+.claude/settings.local.json
+
+# Tooling and caches
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+.tmp/
+.coverage
+.pytest_cache/
+
+# Working output lives outside the repository. Directories are anchored with a leading slash
+# so that, for example, /out/ does not silently hide a nested src/out/.
+/tmp/
+/jobs/
+/out/
+/output/
+/work/
+/docs/plans/
+/docs/evidence/
+
+# Deny by default for data, logs, models and media. To publish one such file on purpose,
+# re-include it by exact name below, then check the result with git ls-files: a "!" rule
+# overrides every earlier rule that matches the same path.
+*.log
+*.db
+*.sqlite
+*.sqlite3
+*.pt
+*.safetensors
+*.mp4
+*.wav

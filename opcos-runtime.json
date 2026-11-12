@@ -1,0 +1,17 @@
+{
+  "schema": "opcos-runtime-needs/1",
+  "repoKey": "agent-crawl-studio",
+  "needs": [
+    {
+      "scope": "own",
+      "category": "venvs",
+      "key": "core",
+      "python": "3.12",
+      "install": {
+        "requirements": ["requirements/core.txt"],
+        "constraints": {"windows": ["locks/core-windows.txt"]}
+      },
+      "paths": {"dir_rel": 77, "file_rel": 86}
+    }
+  ]
+}

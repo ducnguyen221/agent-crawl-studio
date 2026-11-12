@@ -1,0 +1,3 @@
+# Direct dependencies of the core venv (venvs/agent-crawl-studio/core). Pin with == only.
+yt-dlp[default]==2026.10.26
+httpx==0.28.1
