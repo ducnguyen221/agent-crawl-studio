@@ -4,7 +4,7 @@ network or output policy off or weaker. The environment variables the code reads
 import re
 from pathlib import Path
 
-from agent_crawl_studio import cli, config, schema
+from agent_crawl_studio import cli, config, envbuild, schema
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "agent_crawl_studio"
 
@@ -26,7 +26,7 @@ def test_environment_variables_read_by_the_code_stay_inside_the_closed_list():
     for text in sources().values():
         found |= set(READ.findall(text))
     assert found, "the scan found nothing: the pattern is wrong"
-    assert found <= CLOSED_ENV_LIST, sorted(found - CLOSED_ENV_LIST)
+    assert found == CLOSED_ENV_LIST, (sorted(found - CLOSED_ENV_LIST), sorted(CLOSED_ENV_LIST - found))
 
 
 def test_environment_is_only_touched_through_the_command_line_entry_point():
@@ -60,3 +60,8 @@ def test_config_keys_are_the_documented_set():
 def test_config_path_is_fixed_under_the_work_root(tmp_path):
     env = {"CRAWL_STUDIO_WORK": str(tmp_path / "w"), "CRAWL_STUDIO_CONFIG": str(tmp_path / "other.json")}
     assert config.config_path(env) == str(tmp_path / "w" / "config.json")
+
+
+def test_subprocess_environment_keys_are_a_closed_list():
+    """ALLOWED_KEYS is what a child process may inherit; adding a name is a SPEC change (FR2.8)."""
+    assert envbuild.ALLOWED_KEYS == ("PATH", "SystemRoot", "windir", "PATHEXT", "USERPROFILE", "TEMP", "TMP", "PYTHONUTF8")

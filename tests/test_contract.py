@@ -280,3 +280,36 @@ def test_parse_request_refuses_a_non_bytes_argument():
     with pytest.raises(ContractError) as info:
         schema.parse_request("{}")
     assert (info.value.path, info.value.why) == ("$", "wrong_type")
+
+
+# --- review round: RF40, RF41, RF42 ----------------------------------------------------------------------------
+def test_output_is_one_line_even_with_line_separators_and_lone_surrogates(tmp_path):
+    request = tmp_path / "r.json"
+    request.write_bytes(dumps(base()))
+
+    def plan_fn(req, env):
+        return {"kind": "plan", "valid": True, "note": "a b\x85c d\x0be\ud800f\x1cg"}
+
+    rc, text = run_cli(["plan", "--request", str(request)], tmp_path, plan_fn=plan_fn)
+    assert rc == 0 and text.count("\n") == 1 and len(text.splitlines()) == 1 and text.isascii()
+    assert json.loads(text)["note"] == "a b\x85c d\x0be\ud800f\x1cg"
+
+
+def test_no_socket_records_every_call_even_when_the_code_swallows_the_exception(no_socket):
+    import socket
+    try:
+        socket.getaddrinfo("example.com", 80)
+    except Exception:  # noqa: BLE001 - library code does exactly this
+        pass
+    assert [call[0] for call in no_socket] == ["getaddrinfo"]
+    no_socket.clear()
+
+
+def test_the_command_line_is_derived_from_COMMANDS(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli, "COMMANDS", {"capabilities": (), "plan": ("--request", "--other"), "run": ("--request",)})
+    request = tmp_path / "r.json"
+    request.write_bytes(dumps(base(extra=1)))
+    rc, text = run_cli(["plan", "--request", str(request), "--other", "x"], tmp_path)
+    assert one_object(text)["error"]["code"] == "INVALID_REQUEST"
+    rc, text = run_cli(["plan", "--request", str(request)], tmp_path)
+    assert one_object(text)["error"]["code"] == "USAGE_ERROR"
