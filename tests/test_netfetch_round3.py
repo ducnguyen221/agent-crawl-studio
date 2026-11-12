@@ -96,6 +96,14 @@ def test_a_short_real_file_is_still_delivered_whole(nf, server):
     assert out.status == "ok" and len(sink.data) == 40 and sink.data.startswith(b"%PDF-")
 
 
+def test_a_short_binary_body_over_the_limit_is_refused_after_the_wait(nf, no_socket):
+    stream = httpx.ByteStream(b"%PDF-1.7" + b"0" * 40)  # no Content-Length: the limit is met only while reading
+    out, sink, _, _ = mock_fetch(nf, {"https://files.example.com/a.pdf": httpx.Response(200, stream=stream)},
+                                 start="https://files.example.com/a.pdf", max_bytes_per_file=10)
+    failed(out, "SIZE_LIMIT")
+    assert sink.data == b""
+
+
 LOGIN = b"<!DOCTYPE html><html>login</html>"
 
 
