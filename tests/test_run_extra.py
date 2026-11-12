@@ -72,3 +72,5 @@ def test_the_run_log_is_best_effort(tmp_path):
     os.rmdir(tmp_path / "job" / "logs")  # the folder disappears under it: writing is silently given up
     log.write("0001 succeeded - u")
     log.write("0002 succeeded - u")
+    assert not os.path.exists(log.path)
+    log.close()

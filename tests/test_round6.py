@@ -243,7 +243,7 @@ def test_a_blocked_run_log_stops_logging_but_not_the_job(tmp_path):
     log = runner.RunLog(str(job), check)
     log.write("a")
     log.write("b")
-    assert (job / "logs" / "run.log").read_text(encoding="utf-8") == "a\n"  # written once, then given up
+    assert not (job / "logs" / "run.log").exists()  # RF184/189: a log that fails its check is taken away again, and given up
 
 
 def test_control_characters_never_reach_a_log_line(world, server, monkeypatch):
