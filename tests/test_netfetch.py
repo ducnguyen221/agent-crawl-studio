@@ -768,7 +768,7 @@ HTTPCORE_ERRORS = [
     ("unreachable", lambda: chained(httpcore.ConnectError("x"), OSError(10051, "unreachable")), "NETWORK_ERROR", "network_unreachable"),
     ("tls", lambda: chained(httpcore.ConnectError("x"), ssl.SSLCertVerificationError("bad")), "NETWORK_ERROR", "tls_verify_failed"),
     ("tls_other", lambda: chained(httpcore.ConnectError("x"), ssl.SSLError("handshake")), "NETWORK_ERROR", "other"),
-    ("truncated", lambda: httpcore.RemoteProtocolError("peer closed"), "NETWORK_ERROR", "truncated_body"),
+    ("remote_protocol_before_the_body", lambda: httpcore.RemoteProtocolError("peer closed"), "NETWORK_ERROR", "other"),  # RF124
     ("proxy", lambda: httpcore.ProxyError("x"), "NETWORK_ERROR", "other"),
     ("unsupported", lambda: httpcore.UnsupportedProtocol("x"), "NETWORK_ERROR", "other"),
     ("local_protocol", lambda: httpcore.LocalProtocolError("x"), "NETWORK_ERROR", "other"),

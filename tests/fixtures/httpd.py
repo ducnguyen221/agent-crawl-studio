@@ -119,7 +119,12 @@ class Handler(BaseHTTPRequestHandler):
             self.stream(size, fill=b" ", first=HTML_HEAD)
         elif path.endswith(".pdf") or path.endswith(".png"):  # /<x>.pdf?kind=html|real&size=N
             size = _int(q, "size", 2000)
-            if q.get("kind", ["real"])[0] == "html":
+            if q.get("kind", ["real"])[0] == "split":  # HTML in two tiny chunks: "<" and then the rest
+                self.head(200, [("Transfer-Encoding", "chunked"), ("Content-Type", "application/octet-stream")], close=True)
+                self.push(b"1\r\n<\r\n")
+                time.sleep(0.05)
+                self.push(b"1b\r\n!DOCTYPE html><html></html>\r\n0\r\n\r\n")
+            elif q.get("kind", ["real"])[0] == "html":
                 self.head(200, [("Content-Type", q.get("ctype", ["text/html"])[0])], size, close=True)
                 self.stream(size, fill=b" ", first=HTML_HEAD)
             else:
@@ -135,6 +140,24 @@ class Handler(BaseHTTPRequestHandler):
             if self.push(line):
                 self.stream(size)
                 self.push(b"\r\n0\r\n\r\n")
+        elif path == "/dribblehdr":  # the header arrives one line at a time, ?every seconds apart, ?n lines
+            self.push(b"HTTP/1.1 200 OK\r\n")
+            for number in range(_int(q, "n", 40)):
+                if not self.push(b"X-%d: y\r\n" % number):
+                    return
+                time.sleep(float(q.get("every", ["0.25"])[0]))
+            self.push(b"Content-Length: 0\r\n\r\n")
+        elif path == "/dribbleext":  # a chunk-size line whose extension arrives byte by byte
+            self.head(200, [("Transfer-Encoding", "chunked")], close=True)
+            self.push(b"5;")
+            for _ in range(_int(q, "n", 40)):
+                if not self.push(b"e"):
+                    return
+                time.sleep(float(q.get("every", ["0.25"])[0]))
+            self.push(b"\r\nhello\r\n0\r\n\r\n")
+        elif path == "/te-gzip":  # a transfer coding h11 does not understand
+            self.head(200, [("Transfer-Encoding", "gzip, chunked")], close=True)
+            self.push(b"5\r\nhello\r\n0\r\n\r\n")
         elif path == "/bighdr":  # a response header of ?size bytes
             self.head(200, [("X-Big", "h" * _int(q, "size", 100000))], 0)
         elif path == "/reset":
