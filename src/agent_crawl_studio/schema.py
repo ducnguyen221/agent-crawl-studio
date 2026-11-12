@@ -152,3 +152,21 @@ def job_status(item_statuses, cancelled=False):
 def new_job_id(now, token=None):
     """YYYYMMDD-HHMMSS-<6 lowercase hex>."""
     return now.strftime("%Y%m%d-%H%M%S") + "-" + (token if token is not None else secrets.token_hex(3))
+
+
+PLAN_KEYS = ("schema_version", "kind", "valid", "network_checked", "output", "limits_effective", "items", "warnings")
+PLAN_ITEM_KEYS = ("id", "url_redacted", "url_sha256", "adapter", "decision")
+
+
+def validate_plan(obj):
+    """Problems found in a plan object (an empty list when it has the documented shape)."""
+    if not isinstance(obj, dict):
+        return ["$"]
+    problems = [key for key in PLAN_KEYS if key not in obj]
+    if isinstance(obj.get("items"), list):
+        for index, item in enumerate(obj["items"]):
+            if not isinstance(item, dict):
+                problems.append("items[%d]" % index)
+                continue
+            problems += ["items[%d].%s" % (index, key) for key in PLAN_ITEM_KEYS if key not in item]
+    return problems

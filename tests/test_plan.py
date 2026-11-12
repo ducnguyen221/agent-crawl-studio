@@ -199,3 +199,13 @@ def test_request_path_with_a_device_name_is_refused_without_opening_it(path, tmp
     rc = cli.main(["plan", "--request", path], out=out, env={"CRAWL_STUDIO_WORK": str(tmp_path / "w")})
     obj = json.loads(out.getvalue())
     assert rc == 2 and obj["error"]["code"] == "INVALID_REQUEST" and out.getvalue().count("\n") == 1
+
+
+def test_a_request_path_with_dot_dot_is_not_mistaken_for_a_device(tmp_path):
+    out = io.StringIO()
+    rc = cli.main(["plan", "--request", "..\\no-such-request.json"], out=out, env={"CRAWL_STUDIO_WORK": str(tmp_path / "w")})
+    assert rc == 2 and json.loads(out.getvalue())["error"]["hint"] == "$ out_of_range"
+
+
+def test_validate_plan_flags_an_item_that_is_not_an_object(world):
+    assert schema.validate_plan(dict(run_plan(world, [PDF]), items=["x"])) == ["items[0]"]
