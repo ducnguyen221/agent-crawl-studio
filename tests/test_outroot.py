@@ -253,7 +253,7 @@ def test_create_job_makes_a_new_folder_and_refuses_an_existing_one(world):
     got = resolve(world)
     job = outroot.create_job(got, "20261113-101010-abcdef", **FAKES)
     assert os.path.isdir(job) and job == os.path.join(got.parent, "20261113-101010-abcdef")
-    with pytest.raises(FileExistsError):
+    with pytest.raises(outroot.JobExists):
         outroot.create_job(got, "20261113-101010-abcdef", **FAKES)
 
 
@@ -297,10 +297,10 @@ def test_real_cf_get_sync_root_info_of_a_plain_folder_is_not_a_sync_root(tmp_pat
 def test_real_cf_get_sync_root_info_finds_a_real_onedrive_root_if_one_exists():
     home = os.environ.get("USERPROFILE")
     roots = [os.path.join(home, n) for n in os.listdir(home) if n.lower().startswith("onedrive")] if home else []
-    hits = [r for r in roots if outroot.default_sync_root_of(r)]
-    if not hits:
-        pytest.skip("BLOCKED_ENV: no OneDrive sync root found on this machine")
-    assert all(outroot.default_sync_root_of(r) is True for r in hits)
+    if not roots:
+        pytest.skip("BLOCKED_ENV: there is no folder named OneDrive* in the user profile of this machine")
+    # RF61: the candidates come from the folder names, NOT from the function under test
+    assert any(outroot.default_sync_root_of(root) is True for root in roots), roots
 
 
 def test_real_free_bytes_of_the_temp_folder_is_positive(tmp_path):
