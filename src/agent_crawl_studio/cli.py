@@ -4,6 +4,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import shutil
 import sys
 import warnings
@@ -49,7 +50,10 @@ def _special_path(path):
 
 def _report_internal(exc):
     """Only the CLASS name of an unexpected failure, on stderr: enough to find it, never its text."""
-    sys.stderr.write("internal error: %s\n" % type(exc).__name__)
+    name = type(exc).__name__
+    if not (isinstance(name, str) and re.fullmatch(r"[A-Za-z0-9_.]{1,64}", name)):
+        name = "unknown"  # a custom class can carry any text as its name
+    sys.stderr.write("internal error: %s\n" % name)
 
 
 def _read_request(path):
@@ -110,7 +114,7 @@ def _quiet():
     logging.disable(logging.CRITICAL)
     try:
         with warnings.catch_warnings(), contextlib.redirect_stdout(sys.stderr):
-            warnings.simplefilter("always")
+            warnings.simplefilter("default")
             warnings.showwarning = _warning_to_stderr
             yield
     finally:
