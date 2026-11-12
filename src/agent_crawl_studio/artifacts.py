@@ -57,6 +57,7 @@ class Part:
 
     def __init__(self, item_id, path, handle):
         self.item_id, self.path, self._file = item_id, path, handle
+        self.placed = None  # where the finished file now is (set the moment the rename is done)
         self.bytes = 0
         self.head = b""
         self._sha = hashlib.sha256()
@@ -123,6 +124,7 @@ class ArtifactWriter:
             target = os.path.join(self.files_dir, name)
             try:
                 retry_io(lambda: self._rename(part.path, target), self._sleep)  # fails when the target exists
+                part.placed = target
             except FileExistsError:
                 continue
             except OSError:

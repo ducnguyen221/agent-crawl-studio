@@ -121,3 +121,29 @@ def test_ctrl_c_while_the_output_place_is_chosen_is_cancelled_not_an_escape(worl
     result, code = go(world, server, [server.url("/ok")], deps={"attrs_of": attrs})
     assert code == 130 and result["status"] == "cancelled" and result["job_id"] is None and result["error"]["code"] == "CANCELLED"
     assert schema.validate_result(result) == []
+
+
+def test_a_second_ctrl_c_in_closing_the_log_is_given_up_on(world, server, monkeypatch):
+    monkeypatch.setattr(runner.RunLog, "close", lambda self: interrupt())
+    result, code = go(world, server, [server.url("/ok")])
+    assert code == 0 and result["status"] == "succeeded"
+
+
+def test_the_cleanup_gives_up_a_step_after_two_interrupts_and_still_does_the_rest(world, server, monkeypatch):
+    seen = []
+    real = os.rmdir
+
+    def rmdir(path, *args, **kwargs):
+        seen.append(path)
+        if len(seen) <= 2:
+            interrupt()  # the same step, interrupted twice
+        return real(path, *args, **kwargs)
+
+    def replace(src, dst):
+        interrupt()
+    monkeypatch.setattr(os, "rmdir", rmdir)
+    result, code = go(world, server, [server.url("/ok")], deps={"replace": replace})
+    monkeypatch.undo()
+    assert code == 130 and result["status"] == "cancelled"
+    leftovers = os.listdir(os.path.join(world["work"], "jobs", os.listdir(os.path.join(world["work"], "jobs"))[0]))
+    assert ".tmp" not in leftovers and "files" not in leftovers
