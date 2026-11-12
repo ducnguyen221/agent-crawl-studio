@@ -76,11 +76,11 @@ def test_three_unreachable_addresses_share_one_connect_timeout(nf):
     """Simulated (no packet leaves the machine): the inner connect sleeps for the time it is given."""
     backend = nf.PinnedBackend(three_addresses())
     backend._inner = SlowInner()
-    started = time.monotonic()
     with pytest.raises(httpcore.ConnectTimeout):
         backend.connect_tcp("pinned.example", 80, timeout=0.4)
-    assert time.monotonic() - started < 0.8
-    assert sum(timeout for _, timeout in backend._inner.calls) <= 0.41 and len(backend._inner.calls) < 3
+    # deterministic (RF161): the first attempt spent the whole budget, so no second attempt was made, and what the
+    # inner connect was given never exceeded the budget; no wall-clock bound that a loaded machine could break
+    assert len(backend._inner.calls) == 1 and backend._inner.calls[0][1] <= 0.4
 
 
 def test_the_shared_connect_timeout_reaches_the_outcome_as_one_timeout(nf):
@@ -88,11 +88,10 @@ def test_the_shared_connect_timeout_reaches_the_outcome_as_one_timeout(nf):
     backend = nf.PinnedBackend(policy)
     backend._inner = SlowInner()
     client = nf.build_client(policy, lim(connect_timeout=0.4), transport=nf.PinnedTransport(policy, lim(), network_backend=backend))
-    started = time.monotonic()
     out = nf.fetch_item("http://pinned.example/x", "auto", lim(connect_timeout=0.4), lambda chunk: None, policy, client=client)
     client.close()
     failed(out, "TIMEOUT", retryable=True)
-    assert time.monotonic() - started < 1
+    assert len(backend._inner.calls) == 1
 
 
 def test_an_address_that_refuses_lets_the_next_one_try(nf, server, connects):
