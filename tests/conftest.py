@@ -65,13 +65,18 @@ def fake_clock():
 
 @pytest.fixture
 def no_socket(monkeypatch):
-    """Any attempt to open a socket or resolve a name fails the test."""
+    """Any attempt to open a socket or resolve a name is RECORDED (code under test may swallow the error
+    it gets) and the test fails at teardown if the list is not empty. A test that provokes a call on
+    purpose must `clear()` the list."""
+    calls = []
 
-    def boom(*args, **kwargs):
-        raise AssertionError("a socket was used where none is allowed")
+    def recorder(name):
+        def refuse(*args, **kwargs):
+            calls.append((name, args))
+            raise OSError("a socket was used where none is allowed")
+        return refuse
 
-    monkeypatch.setattr(socket, "socket", boom)
-    monkeypatch.setattr(socket, "create_connection", boom)
-    monkeypatch.setattr(socket, "getaddrinfo", boom)
-    monkeypatch.setattr(socket, "gethostbyname", boom)
-    return boom
+    for name in ("socket", "create_connection", "getaddrinfo", "gethostbyname"):
+        monkeypatch.setattr(socket, name, recorder(name))
+    yield calls
+    assert not calls, "socket use recorded: %r" % (calls,)
