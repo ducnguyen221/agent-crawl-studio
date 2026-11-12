@@ -106,7 +106,7 @@ GROUP_REASONS = {  # RF54: the reason must be the right one for the group, not j
     "embedded": {"ip_not_public"}, "ambiguous": {"ambiguous_host", "empty_host", "ip_not_public"},
     "names": {"local_name", "single_label", "bad_label", "host_too_long", "bad_char", "percent_in_host", "userinfo", "bad_port"},
     "unicode": {"ip_not_public", "local_name", "single_label", "idna", "bad_label", "bad_char"},
-    "ipv6_forms": {"bad_ip_literal", "bad_authority", "percent_in_host"},
+    "ipv6_forms": {"bad_ip_literal", "bad_authority", "percent_in_host", "bad_port"},
 }
 BLOCKED = [(group, url) for group, urls in BLOCKED_GROUPS.items() for url in urls]
 

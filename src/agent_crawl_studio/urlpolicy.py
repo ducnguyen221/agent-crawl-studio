@@ -28,6 +28,8 @@ BLOCK_REASONS = (
     "ambiguous_host", "single_label", "local_name", "parser_mismatch", "parser_error",
 )
 
+LOCAL_SUFFIXES = (".localhost", ".local", ".internal", ".home.arpa", ".localdomain")
+
 _PORT = re.compile(r"[0-9]{1,5}")
 _LABEL = re.compile(r"[a-z0-9]([a-z0-9-]*[a-z0-9])?")
 _NUMERIC_LABEL = re.compile(r"[0-9]+|0x[0-9a-f]*")
@@ -119,7 +121,7 @@ def _check_raw(text):
     if len(text) > MAX_URL_LENGTH:
         raise Blocked("too_long")
     for ch in text:
-        if ch in "\\ " or unicodedata.category(ch) in ("Cc", "Cs", "Zs", "Zl", "Zp"):
+        if ch in "\\ " or unicodedata.category(ch) in ("Cc", "Cf", "Cs", "Zs", "Zl", "Zp"):
             raise Blocked("bad_char")
 
 
@@ -221,7 +223,7 @@ def _host(host_text, bracketed, policy):
         if not policy.ip_ok(host):
             raise Blocked("ip_not_public")
         return host, host, True
-    if host == "localhost" or host.endswith(".localhost") or host.endswith(".local"):
+    if host == "localhost" or host.endswith(LOCAL_SUFFIXES):
         raise Blocked("local_name")
     if len(labels) < 2:
         raise Blocked("single_label")
@@ -254,6 +256,8 @@ def check_url(raw, policy=None):
     default_port = 443 if scheme == "https" else 80
     netloc = display if port == default_port else "%s:%d" % (display, port)
     url = "%s://%s%s" % (scheme, netloc, target)
+    if len(url) > MAX_URL_LENGTH:  # percent-encoding can make a short raw text long
+        raise Blocked("too_long")
     try:
         parsed = httpx.URL(url)
         theirs = parsed.raw_host.decode("ascii").lower()
@@ -280,7 +284,7 @@ def dns_probe(host, timeout=DNS_TIMEOUT, resolver=None, ip_ok=None, port=443):
     def lookup():
         try:
             box["infos"] = resolver(host, port, proto=socket.IPPROTO_TCP)
-        except OSError:
+        except Exception:  # noqa: BLE001 - UnicodeError, ValueError... from the resolver are "did not resolve"
             box["infos"] = None
 
     worker = threading.Thread(target=lookup, daemon=True)
@@ -289,25 +293,54 @@ def dns_probe(host, timeout=DNS_TIMEOUT, resolver=None, ip_ok=None, port=443):
     infos = box.get("infos")
     if not infos:
         return DNS_FAIL
-    return DNS_OK if all(ip_ok(info[4][0]) for info in infos) else DNS_BLOCKED
+    try:
+        return DNS_OK if all(ip_ok(info[4][0]) for info in infos) else DNS_BLOCKED
+    except Exception:  # noqa: BLE001 - a malformed answer is never trusted
+        return DNS_BLOCKED
 
 
 def _clean(text):
     return "".join(ch for ch in text if unicodedata.category(ch) not in ("Cc", "Cf", "Cs", "Zl", "Zp"))
 
 
+_PREFIX = re.compile(r"^(?:[A-Za-z][A-Za-z0-9+.-]*:)?//")
+_USER_PASSWORD = re.compile(r"[^:]*:(?!\d*$)")
+
+
+def _strip_userinfo(text):
+    """`text` without any userinfo, decided on the WHOLE string before it is cut at ?, / or #: a password may
+    hold those characters. Returns None when an "@" is there but cannot be understood."""
+    found = _PREFIX.match(text)
+    if not found:
+        return None if "@" in text else text
+    prefix, rest = found.group(0), text[found.end():]
+    ends = [i for i in (rest.find(mark) for mark in "/?#") if i != -1]
+    naive = rest[:min(ends)] if ends else rest
+    if "@" in naive:
+        rest = rest[naive.rfind("@") + 1:]
+    elif "@" in rest and _USER_PASSWORD.match(naive):  # "user:pa?ss@host": the delimiter is inside the password
+        rest = rest[rest.rfind("@") + 1:]
+    else:
+        return text
+    cut = [i for i in (rest.find(mark) for mark in "/?#") if i != -1]
+    if not rest[:min(cut)] if cut else not rest:
+        return None
+    return prefix + rest
+
+
 def redact(url):
     """A URL safe to print: no userinfo, no fragment, no control or bidi characters, and every query
     parameter's value (or the whole parameter when it has no "=") replaced by REDACTED, at most 2048
-    characters. Known limit: a token inside the PATH cannot be hidden."""
+    characters. A userinfo that cannot be parsed gives scheme://REDACTED/ (or REDACTED). Known limit: a
+    token inside the PATH cannot be hidden."""
     text = getattr(url, "url", url)
     if not isinstance(text, str):
         return ""
-    text = _clean(text).split("#", 1)[0]
-    head, mark, query = text.partition("?")
-    found = _AUTHORITY.match(head)
-    if found and "@" in found.group(2):
-        head = found.group(1) + found.group(2).rsplit("@", 1)[1] + found.group(3)
+    text = _strip_userinfo(_clean(text))
+    if text is None:
+        found = re.match(r"^([A-Za-z][A-Za-z0-9+.-]*:)?//", _clean(getattr(url, "url", url)))
+        return (found.group(0) + "REDACTED/") if found else "REDACTED"
+    head, mark, query = text.split("#", 1)[0].partition("?")
     if mark and query:
         parts = []
         for part in query.split("&"):
@@ -325,7 +358,8 @@ def url_sha256(url, policy=None):
         try:
             text = check_url(url, policy).url
         except Blocked:
-            text = url.split("#", 1)[0]
+            stripped = _strip_userinfo(_clean(url))  # never hash a password
+            text = "REDACTED" if stripped is None else stripped.split("#", 1)[0]
     else:
         text = ""
     return hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()
