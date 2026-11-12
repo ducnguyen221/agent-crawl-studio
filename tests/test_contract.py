@@ -186,12 +186,14 @@ def test_bad_command_lines_are_usage_errors_with_one_json_line(argv, tmp_path):
     assert rc == 2 and one_object(text)["error"]["code"] == "USAGE_ERROR"
 
 
-def test_run_is_not_available_in_slice_a(tmp_path):
+def test_run_is_wired_to_the_runner_and_is_no_longer_a_usage_error(tmp_path):
+    """Slice A answered `run` with USAGE_ERROR ("not available yet"); TK16 replaces that with the real runner."""
     request = tmp_path / "r.json"
     request.write_bytes(dumps(base()))
-    rc, text = run_cli(["run", "--request", str(request)], tmp_path)
+    rc, text = run_cli(["run", "--request", str(request)], tmp_path,
+                       run_fn=lambda req, env: ({"schema_version": 1, "kind": "result", "status": "succeeded"}, 0))
     obj = one_object(text)
-    assert rc == 2 and obj["error"]["code"] == "USAGE_ERROR" and "not available" in obj["error"]["hint"]
+    assert rc == 0 and obj["status"] == "succeeded" and "error" not in obj
 
 
 def test_plan_result_of_the_injected_function_is_printed_as_one_line_exit_0(tmp_path):
