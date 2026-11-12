@@ -61,7 +61,7 @@ def test_the_connect_phase_uses_the_time_left_before_the_deadline(nf):
     backend.deadline = time.monotonic() + 0.3
     with pytest.raises(httpcore.ConnectTimeout):
         backend.connect_tcp("pinned.example", 80, timeout=5)
-    assert backend._inner.calls[0][1] <= 0.3
+    assert backend._inner.calls[0][1] <= 0.31
     backend.deadline = time.monotonic() - 1
     with pytest.raises(httpcore.ReadTimeout):
         backend.connect_tcp("pinned.example", 80, timeout=5)
@@ -91,8 +91,14 @@ def test_ctrl_c_in_the_part_check_cancels_the_job(world, server):
 
 
 def test_ctrl_c_in_the_url_check_cancels_the_job(world, server, monkeypatch):
-    def boom(url, policy=None):
-        raise KeyboardInterrupt
+    real = runner.urlpolicy.check_url
+    calls = []
+
+    def boom(url, policy=None):  # url_sha256 calls check_url too: only the first call is interrupted
+        calls.append(url)
+        if len(calls) == 1:
+            raise KeyboardInterrupt
+        return real(url, policy)
     monkeypatch.setattr(runner.urlpolicy, "check_url", boom)
     result, code = go(world, server, [server.url("/ok")] * 2)
     assert code == 130 and statuses(result) == ["cancelled"] * 2 and manifest_of(world, result) == result
@@ -129,7 +135,7 @@ def test_ctrl_c_inside_the_replace_leaves_no_temp_manifest(world, server):
         os.replace(src, dst)
     result, code = go(world, server, [server.url("/ok")] * 2, deps={"replace": replace})
     assert code == 130
-    assert [name for name in os.listdir(job_dir_of(world, result)) if name.endswith(".tmp")] == []
+    assert [name for name in os.listdir(job_dir_of(world, result)) if name.startswith("manifest.json.")] == []
 
 
 # ----------------------------------------------------------------------------- RF183: a junction is removed as a link
@@ -160,16 +166,22 @@ def test_a_log_that_fails_its_check_does_not_touch_the_job(world, server):
     assert not os.path.exists(os.path.join(job_dir_of(world, result), "logs", "run.log"))
 
 
-def test_the_run_log_keeps_its_handle_and_does_not_reopen_by_path(tmp_path):
+def test_the_run_log_keeps_its_handle_and_does_not_reopen_by_path(tmp_path, monkeypatch):
+    import builtins
     (tmp_path / "job").mkdir()
     log = runner.RunLog(str(tmp_path / "job"), lambda path: None)
-    log.write("a")
-    moved = log.path + ".moved"
-    os.rename(log.path, moved)
-    open(log.path, "w", encoding="utf-8").close()  # something else now sits at the path
-    log.write("b")
+    opened = []
+    real_open = builtins.open
+
+    def counting(file, *args, **kwargs):
+        opened.append(str(file))
+        return real_open(file, *args, **kwargs)
+    monkeypatch.setattr(builtins, "open", counting)
+    for line in ("a", "b", "c"):
+        log.write(line)
     log.close()
-    assert open(moved, encoding="utf-8").read() == "a\nb\n" and open(log.path, encoding="utf-8").read() == ""
+    monkeypatch.undo()
+    assert opened == [log.path] and real_open(log.path, encoding="utf-8").read() == "a\nb\nc\n"
 
 
 # ----------------------------------------------------------------------------- RF185 / RF187

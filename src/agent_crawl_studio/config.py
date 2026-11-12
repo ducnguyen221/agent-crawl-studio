@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from . import capabilities
 
 CONFIG_KEYS = ("output_roots", "media_host_allowlist")
+# `media_host_allowlist` of a user's config.json is read and validated, but nothing acts on it until SPR-03 (media
+# through the core); the smoke script uses this default tuple.
 DEFAULT_MEDIA_HOSTS = ("youtube.com", "youtu.be", "vimeo.com", "soundcloud.com", "tiktok.com")
 MAX_CONFIG_BYTES = 1024 * 1024
 FILE_NAME = "config.json"

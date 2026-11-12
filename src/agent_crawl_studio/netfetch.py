@@ -6,6 +6,7 @@ name. Every `httpcore.*` exception is turned into `NetError` (they are not `http
 followed here, one fresh client per step, each step passing the URL policy again. Nothing reads the environment
 and nothing here can switch the policy off: the policy arrives as a parameter of the code."""
 
+import contextlib
 import dataclasses
 import errno
 import http.cookiejar
@@ -26,7 +27,7 @@ REDIRECT_STATUSES = (301, 302, 303, 307, 308)
 HEADERS_KEPT = ("content-type", "content-disposition", "last-modified", "retry-after")
 MAX_HEADER_TEXT = 200
 UNREACHABLE = frozenset({10051, 10065, errno.ENETUNREACH, errno.EHOSTUNREACH, errno.ENETDOWN})
-MAX_RESOLVER_THREADS = 8  # lookups that may be stuck at the same time; more are refused (TIMEOUT) at once
+MAX_RESOLVER_THREADS = 8  # lookups that may be stuck at the same time; one more is refused at once (TIMEOUT), never waited for
 RESOLVER_SLOTS = threading.BoundedSemaphore(MAX_RESOLVER_THREADS)
 TIMEOUT_CLASSES = (httpcore.ConnectTimeout, httpcore.ReadTimeout, httpcore.WriteTimeout, httpcore.PoolTimeout)
 
@@ -93,8 +94,12 @@ class DeadlineStream(httpcore.NetworkStream):
         self._stream.close()
 
     def start_tls(self, ssl_context, server_hostname=None, timeout=None):
-        tls = self._stream.start_tls(ssl_context, server_hostname, timeout=self._backend.remaining(timeout))
-        return DeadlineStream(tls, self._backend)
+        try:
+            timeout = self._backend.remaining(timeout)
+        except BaseException:  # the deadline has passed: the connection must not be left open behind us
+            self._stream.close()
+            raise
+        return DeadlineStream(self._stream.start_tls(ssl_context, server_hostname, timeout=timeout), self._backend)
 
     def get_extra_info(self, info):
         return self._stream.get_extra_info(info)
@@ -119,7 +124,7 @@ class PinnedBackend(httpcore.NetworkBackend):
 
     def _resolve(self, host, port, timeout):
         box = {}
-        if not RESOLVER_SLOTS.acquire(timeout=timeout):
+        if not RESOLVER_SLOTS.acquire(blocking=False):
             raise NetError("TIMEOUT")
 
         def lookup():
@@ -321,8 +326,7 @@ class _Run:
                                 pool=min(self.limits["connect_timeout"], left))
         client.cookies.clear()  # a client that was handed to us may hold cookies: none is ever sent
         try:
-            with client.stream("GET", target.url, timeout=timeout, follow_redirects=False,
-                               extensions={"deadline": time.monotonic() + left}) as response:
+            with contextlib.closing(self.send(client, target.url, timeout, left)) as response:
                 self.redirects = self.step
                 self.headers = _headers_clean(response.headers)
                 if response.status_code in REDIRECT_STATUSES:
@@ -341,6 +345,14 @@ class _Run:
         finally:
             if own:
                 client.close()
+
+    def send(self, client, url, timeout, left):
+        """One GET on `client`, whatever the client was set up with: no redirect following, no authentication, and
+        the `Cookie` and `Authorization` headers a handed-over client may carry are taken off the request."""
+        request = client.build_request("GET", url, timeout=timeout, extensions={"deadline": time.monotonic() + left})
+        for name in ("cookie", "authorization"):
+            request.headers.pop(name, None)
+        return client.send(request, stream=True, auth=None, follow_redirects=False)
 
     def net_failure(self, exc):
         if exc.code == "URL_BLOCKED":
