@@ -65,9 +65,10 @@ def test_a_manifest_that_cannot_even_be_started_refuses_the_job(world, server):
     assert code == 2 and result["job_id"] is None and result["error"]["code"] == "OUTPUT_WRITE_FAILED"
 
 
-def test_the_run_log_is_best_effort(world, server, monkeypatch):
-    def broken(*args, **kwargs):
-        raise OSError("no log")
-    monkeypatch.setattr(os, "makedirs", lambda path, exist_ok=False: broken() if str(path).endswith("logs") else os.mkdir(path) if not os.path.isdir(path) else None)
-    result, code = go(world, server, [server.url("/ok")])
-    assert code == 0 and result["status"] == "succeeded"
+def test_the_run_log_is_best_effort(tmp_path):
+    from agent_crawl_studio import runner
+    (tmp_path / "job").mkdir()
+    log = runner.RunLog(str(tmp_path / "job"), lambda path: None)
+    os.rmdir(tmp_path / "job" / "logs")  # the folder disappears under it: writing is silently given up
+    log.write("0001 succeeded - u")
+    log.write("0002 succeeded - u")

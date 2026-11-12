@@ -241,9 +241,16 @@ def test_every_written_file_is_checked_for_junctions_after_it_is_written(world, 
 
 
 def test_a_reparse_point_found_under_files_blocks_the_item_and_stops_the_job(world, server):
-    def attrs(path):
-        return (0x400, 0) if (os.sep + "files" + os.sep) in path else None
-    result, code = go(world, server, [server.url("/ok"), server.url("/ok")], deps={"attrs_of": attrs})
+    state = {"reported": False}
+
+    def attrs(path):  # reports the junction ONCE: the second item is stopped by the job, not by a second finding
+        if (os.sep + "files" + os.sep) in path and not state["reported"]:
+            state["reported"] = True
+            return (0x400, 0)
+        return None
+    fetch = wrapped_fetch(lambda n, url: None)
+    result, code = go(world, server, [server.url("/ok"), server.url("/ok")], deps={"attrs_of": attrs, "fetch": fetch})
+    assert len(fetch.calls) == 1  # RF146: nothing is fetched after the block
     assert code == 1 and result["status"] == "failed"
     assert [i["status"] for i in result["items"]] == ["blocked", "blocked"]
     assert all(i["error"]["code"] == "OUTPUT_PATH_BLOCKED" for i in result["items"])
