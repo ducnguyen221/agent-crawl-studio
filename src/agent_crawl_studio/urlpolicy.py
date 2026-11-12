@@ -303,6 +303,7 @@ def _clean(text):
     return "".join(ch for ch in text if unicodedata.category(ch) not in ("Cc", "Cf", "Cs", "Zl", "Zp"))
 
 
+_PARAM_NAME = re.compile(r"[A-Za-z0-9_.\[\]-]{1,32}")
 _PREFIX = re.compile(r"^(?:[A-Za-z][A-Za-z0-9+.-]*:)?//")
 _USER_PASSWORD = re.compile(r"[^:]*:(?!\d*$)")
 
@@ -331,8 +332,10 @@ def _strip_userinfo(text):
 def redact(url):
     """A URL safe to print: no userinfo, no fragment, no control or bidi characters, and every query
     parameter's value (or the whole parameter when it has no "=") replaced by REDACTED, at most 2048
-    characters. A userinfo that cannot be parsed gives scheme://REDACTED/ (or REDACTED). Known limit: a
-    token inside the PATH cannot be hidden."""
+    characters. A userinfo that cannot be parsed gives scheme://REDACTED/ (or REDACTED). A parameter NAME is
+    printed only when it is short and plain (letters, digits, _ . [ ] -, at most 32); otherwise the whole
+    parameter is REDACTED. Documented limit: a token inside the PATH, including a path parameter such as
+    ";jsessionid=..." (the part after ";"), cannot be hidden."""
     text = getattr(url, "url", url)
     if not isinstance(text, str):
         return ""
@@ -344,7 +347,8 @@ def redact(url):
     if mark and query:
         parts = []
         for part in query.split("&"):
-            parts.append(part.split("=", 1)[0] + "=REDACTED" if "=" in part else "REDACTED")
+            name, equals, _value = part.partition("=")
+            parts.append(name + "=REDACTED" if equals and _PARAM_NAME.fullmatch(name) else "REDACTED")
         head = head + "?" + "&".join(parts)
     return head[:MAX_URL_LENGTH]
 

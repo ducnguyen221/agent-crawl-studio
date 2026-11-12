@@ -114,6 +114,8 @@ def parse_request(raw):
     if version != SCHEMA_VERSION:
         raise _bad("$.schema_version", "out_of_range")
 
+    if "limits" in doc and doc["limits"] is None:  # absent is fine, an explicit null is not
+        raise _bad("$.limits", "wrong_type")
     effective, warnings = limits_mod.resolve(doc.get("limits"))
 
     urls = doc["urls"]
