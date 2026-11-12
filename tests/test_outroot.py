@@ -373,3 +373,27 @@ def test_post_create_check_refuses_a_path_that_left_the_root(world, tmp_path):
     with pytest.raises(PathBlocked) as info:
         outroot.post_create_check(str(tmp_path / "elsewhere" / "job"), got)
     assert info.value.reason == "outside_root"
+
+
+def test_the_longest_matching_root_is_reported(world):
+    inner = os.path.join(world["work"], "jobs", "inner")
+    assert resolve(world, os.path.join(inner, "x"), inner).root == inner
+    assert resolve(world, os.path.join(world["work"], "jobs", "other")).root == world["work"]
+
+
+def test_the_longest_root_wins_whatever_the_order_of_the_config(world):
+    inner = os.path.join(world["work"], "jobs", "inner")
+    reordered = config.Config(world["work"], [inner, world["work"]], tuple(config.DEFAULT_MEDIA_HOSTS), [])
+    got = outroot.resolve_output(os.path.join(inner, "x"), reordered, world["env"], **FAKES)
+    assert got.root == inner
+
+
+def test_a_job_folder_that_cannot_be_removed_after_a_failed_check_still_reports_the_block(world, monkeypatch):
+    got = resolve(world)
+
+    def boom(path):
+        raise OSError("in use")
+
+    monkeypatch.setattr(os, "rmdir", boom)
+    with pytest.raises(PathBlocked):
+        outroot.create_job(got, "20261113-101010-bbbbbb", attrs_of=lambda p: (0x410, 0xA0000003) if p.endswith("bbbbbb") else None)
