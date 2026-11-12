@@ -266,3 +266,17 @@ def test_job_id_format():
     job_id = schema.new_job_id(datetime.datetime(2026, 11, 13, 9, 5, 7), "a1b2c3")
     assert job_id == "20261113-090507-a1b2c3" and re.fullmatch(r"[0-9]{8}-[0-9]{6}-[0-9a-f]{6}", job_id)
     assert re.fullmatch(r"[0-9]{8}-[0-9]{6}-[0-9a-f]{6}", schema.new_job_id(datetime.datetime(2026, 1, 2, 3, 4, 5)))
+
+
+def test_run_with_an_invalid_request_is_rejected_like_plan(tmp_path):
+    request = tmp_path / "r.json"
+    request.write_bytes(dumps(base(extra=1)))
+    rc, text = run_cli(["run", "--request", str(request)], tmp_path)
+    obj = one_object(text)
+    assert rc == 2 and obj["error"]["code"] == "INVALID_REQUEST" and obj["job_id"] is None and obj["status"] == "failed"
+
+
+def test_parse_request_refuses_a_non_bytes_argument():
+    with pytest.raises(ContractError) as info:
+        schema.parse_request("{}")
+    assert (info.value.path, info.value.why) == ("$", "wrong_type")
