@@ -26,6 +26,8 @@ REDIRECT_STATUSES = (301, 302, 303, 307, 308)
 HEADERS_KEPT = ("content-type", "content-disposition", "last-modified", "retry-after")
 MAX_HEADER_TEXT = 200
 UNREACHABLE = frozenset({10051, 10065, errno.ENETUNREACH, errno.EHOSTUNREACH, errno.ENETDOWN})
+MAX_RESOLVER_THREADS = 8  # lookups that may be stuck at the same time; more are refused (TIMEOUT) at once
+RESOLVER_SLOTS = threading.BoundedSemaphore(MAX_RESOLVER_THREADS)
 TIMEOUT_CLASSES = (httpcore.ConnectTimeout, httpcore.ReadTimeout, httpcore.WriteTimeout, httpcore.PoolTimeout)
 
 
@@ -47,8 +49,9 @@ def _chain(exc):
     return seen
 
 
-def classify(exc):
-    """The NetError for an exception that came out of httpcore (by class, never by text)."""
+def classify(exc, body=False):
+    """The NetError for an exception that came out of httpcore (by class, never by text). `body` is True for an
+    error that surfaced while the body was being read: only then is a protocol error a truncated body."""
     if isinstance(exc, NetError):
         return exc
     if isinstance(exc, TIMEOUT_CLASSES):
@@ -68,9 +71,33 @@ def classify(exc):
             return NetError("NETWORK_ERROR", "dns_failed")
         if isinstance(found, OSError) and (found.errno in UNREACHABLE or getattr(found, "winerror", None) in UNREACHABLE):
             return NetError("NETWORK_ERROR", "network_unreachable")
-    if isinstance(exc, httpcore.RemoteProtocolError):
+    if body and isinstance(exc, httpcore.RemoteProtocolError):
         return NetError("NETWORK_ERROR", "truncated_body")
     return NetError("NETWORK_ERROR", "other")
+
+
+class DeadlineStream(httpcore.NetworkStream):
+    """A network stream whose every read, write and TLS handshake is capped by the time left until the backend's
+    absolute deadline: a server that sends one byte at a time cannot stretch a request past it."""
+
+    def __init__(self, stream, backend):
+        self._stream, self._backend = stream, backend
+
+    def read(self, max_bytes, timeout=None):
+        return self._stream.read(max_bytes, timeout=self._backend.remaining(timeout))
+
+    def write(self, buffer, timeout=None):
+        self._stream.write(buffer, timeout=self._backend.remaining(timeout))
+
+    def close(self):
+        self._stream.close()
+
+    def start_tls(self, ssl_context, server_hostname=None, timeout=None):
+        tls = self._stream.start_tls(ssl_context, server_hostname, timeout=self._backend.remaining(timeout))
+        return DeadlineStream(tls, self._backend)
+
+    def get_extra_info(self, info):
+        return self._stream.get_extra_info(info)
 
 
 class PinnedBackend(httpcore.NetworkBackend):
@@ -79,15 +106,29 @@ class PinnedBackend(httpcore.NetworkBackend):
     def __init__(self, policy):
         self.policy = policy
         self._inner = httpcore.SyncBackend()
+        self.deadline = None  # absolute time.monotonic() value set per request by the transport
+
+    def remaining(self, timeout):
+        """`timeout` capped by the time left before the deadline; a passed deadline is a timeout."""
+        if self.deadline is None:
+            return timeout
+        left = self.deadline - time.monotonic()
+        if left <= 0:
+            raise httpcore.ReadTimeout("deadline")
+        return left if timeout is None else min(timeout, left)
 
     def _resolve(self, host, port, timeout):
         box = {}
+        if not RESOLVER_SLOTS.acquire(timeout=timeout):
+            raise NetError("TIMEOUT")
 
         def lookup():
             try:
                 box["infos"] = self.policy.resolver(host, port, proto=socket.IPPROTO_TCP)
             except BaseException as exc:  # noqa: BLE001 - whatever a resolver raises is "did not resolve"
                 box["error"] = exc
+            finally:
+                RESOLVER_SLOTS.release()
 
         worker = threading.Thread(target=lookup, daemon=True)
         worker.start()
@@ -102,6 +143,7 @@ class PinnedBackend(httpcore.NetworkBackend):
     def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
         if port not in self.policy.ports:
             raise NetError("URL_BLOCKED", "port_not_allowed")
+        timeout = self.remaining(timeout)
         started = time.monotonic()
         addresses = self._resolve(host, port, timeout)
         if not addresses:
@@ -115,8 +157,8 @@ class PinnedBackend(httpcore.NetworkBackend):
             if left is not None and left <= 0:  # one deadline for the whole connect phase, not one per address
                 raise last or httpcore.ConnectTimeout("connect deadline")
             try:
-                return self._inner.connect_tcp(ip, port, timeout=left, local_address=local_address,
-                                               socket_options=socket_options)
+                return DeadlineStream(self._inner.connect_tcp(ip, port, timeout=left, local_address=local_address,
+                                                              socket_options=socket_options), self)
             except (httpcore.ConnectError, httpcore.ConnectTimeout) as exc:
                 last = exc
         raise last
@@ -139,7 +181,7 @@ class _GuardedStream(httpx.SyncByteStream):
             for chunk in self._stream:
                 yield chunk
         except Exception as exc:  # noqa: BLE001
-            raise classify(exc) from None
+            raise classify(exc, body=True) from None
 
     def close(self):
         self._stream.close()
@@ -151,6 +193,7 @@ class PinnedTransport(httpx.BaseTransport):
 
     def __init__(self, policy, limits, network_backend=None):
         backend = network_backend if network_backend is not None else PinnedBackend(policy)
+        self._backend = backend
         context = httpx.create_ssl_context(verify=True, trust_env=False)
         self._pool = httpcore.ConnectionPool(ssl_context=context, network_backend=backend, max_connections=1,
                                              http1=True, http2=False)
@@ -161,6 +204,8 @@ class PinnedTransport(httpx.BaseTransport):
             method=request.method,
             url=httpcore.URL(scheme=url.raw_scheme, host=url.raw_host, port=url.port, target=url.raw_path),
             headers=request.headers.raw, content=request.stream, extensions=request.extensions)
+        if isinstance(self._backend, PinnedBackend):
+            self._backend.deadline = request.extensions.get("deadline")
         try:
             response = self._pool.handle_request(core)
         except Exception as exc:  # noqa: BLE001
@@ -239,6 +284,7 @@ class _Run:
         self.total_remaining, self.clock, self.job_deadline = total_remaining, clock, job_deadline
         self.item_deadline = clock() + limits["item_timeout"]
         self.step = 0
+        self.first_path = ""
         self.redirects = 0
         self.final_url = None
         self.headers = {}
@@ -268,13 +314,15 @@ class _Run:
             return self.outcome("failed", "TIMEOUT"), None
         own = self.client is None
         client = build_client(self.policy, self.limits) if own else self.client
-        timeout = _time_left(self.limits, self.clock(), self.item_deadline, self.job_deadline)
-        timeout = httpx.Timeout(connect=min(self.limits["connect_timeout"], timeout),
-                                read=min(self.limits["idle_timeout"], timeout),
-                                write=min(self.limits["idle_timeout"], timeout),
-                                pool=min(self.limits["connect_timeout"], timeout))
+        left = _time_left(self.limits, self.clock(), self.item_deadline, self.job_deadline)
+        timeout = httpx.Timeout(connect=min(self.limits["connect_timeout"], left),
+                                read=min(self.limits["idle_timeout"], left),
+                                write=min(self.limits["idle_timeout"], left),
+                                pool=min(self.limits["connect_timeout"], left))
+        client.cookies.clear()  # a client that was handed to us may hold cookies: none is ever sent
         try:
-            with client.stream("GET", target.url, timeout=timeout) as response:
+            with client.stream("GET", target.url, timeout=timeout, follow_redirects=False,
+                               extensions={"deadline": time.monotonic() + left}) as response:
                 self.redirects = self.step
                 self.headers = _headers_clean(response.headers)
                 if response.status_code in REDIRECT_STATUSES:
@@ -312,7 +360,8 @@ class _Run:
             return self.outcome("failed", "CONTENT_MISMATCH", "content_encoding_unsupported", status)
         declared = _content_length(response.headers)
         html_type = sniff.is_html_content_type(response.headers.get("content-type"))
-        binary_url = self.expect != "html" and sniff.has_binary_extension(urlsplit(target.url).path)
+        binary_url = self.expect != "html" and any(
+            sniff.has_binary_extension(path) for path in (self.first_path, urlsplit(target.url).path))
         if binary_url and html_type:
             return self.outcome("failed", "CONTENT_MISMATCH", None, status)
         cap = self.limits["max_bytes_per_file"]
@@ -324,25 +373,43 @@ class _Run:
             return self.outcome("failed", "SIZE_LIMIT", None, status)
         return self.body(response, status, binary_url, declared, cap)
 
+    def take(self, chunk):
+        """Hand a chunk to the sink within the limits. Returns an outcome to stop with, or None."""
+        if self.declared is not None and self.received + len(chunk) > self.declared:
+            chunk = chunk[:self.declared - self.received]  # exactly the declared length (h11 drops the excess itself)
+        if self.received + len(chunk) > self.cap:
+            return self.outcome("failed", "SIZE_LIMIT", None, self.http)
+        self.sink(chunk)
+        self.received += len(chunk)
+        return None
+
     def body(self, response, status, binary_url, declared, cap):
-        received, first = 0, True
+        self.received, self.declared, self.cap, self.http = 0, declared, cap, status
+        held, sniffing = b"", binary_url  # a binary file is judged on its first 512 bytes (or all of a shorter body)
         for chunk in response.iter_raw():
-            if first and binary_url and sniff.looks_like_html(chunk):
-                return self.outcome("failed", "CONTENT_MISMATCH", None, status)
-            first = False
-            if declared is not None and received + len(chunk) > declared:
-                chunk = chunk[:declared - received]  # exactly the declared length (h11 drops the excess itself)
-            if received + len(chunk) > cap:
-                return self.outcome("failed", "SIZE_LIMIT", None, status)
-            self.sink(chunk)
-            received += len(chunk)
-            if declared is not None and received >= declared:
+            if sniffing:
+                held += chunk
+                if len(held) < sniff.HEAD_BYTES:
+                    continue
+                sniffing, chunk, held = False, held, b""
+                if sniff.looks_like_html(chunk):
+                    return self.outcome("failed", "CONTENT_MISMATCH", None, status)
+            stop = self.take(chunk)
+            if stop is not None:
+                return stop
+            if declared is not None and self.received >= declared:
                 break
             if self.late():
                 return self.outcome("failed", "TIMEOUT", None, status)
-        if declared is not None and received < declared:
+        if sniffing and held:
+            if sniff.looks_like_html(held):
+                return self.outcome("failed", "CONTENT_MISMATCH", None, status)
+            stop = self.take(held)
+            if stop is not None:
+                return stop
+        if declared is not None and self.received < declared:
             return self.outcome("failed", "NETWORK_ERROR", "truncated_body", status)
-        return self.outcome("ok", http_status=status, bytes_received=received)
+        return self.outcome("ok", http_status=status, bytes_received=self.received)
 
 
 def fetch_item(url, expect, limits, sink, policy, client=None, *, total_remaining=None, clock=time.monotonic,
@@ -354,6 +421,7 @@ def fetch_item(url, expect, limits, sink, policy, client=None, *, total_remainin
         target = urlpolicy.check_url(url, policy)
     except urlpolicy.Blocked as exc:
         return run.blocked(exc.reason)
+    run.first_path = urlsplit(target.url).path
     seen = set()
     while True:
         seen.add(target.url)
