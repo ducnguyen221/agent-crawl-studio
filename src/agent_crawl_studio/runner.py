@@ -67,6 +67,9 @@ def plan(request, env, deps=None):
     except outroot.WriteBlocked as exc:
         error = error_object("OUTPUT_WRITE_FAILED", hint="missing_gib=%d" % exc.missing_gib)
         extra = []
+    except OSError:  # a probe of the place failed (free space, a folder)
+        error = error_object("OUTPUT_WRITE_FAILED")
+        extra = []
     warnings += [warning for warning in extra if warning not in warnings]
     result = {
         "schema_version": schema.SCHEMA_VERSION, "kind": "plan", "valid": error is None, "network_checked": False,
@@ -90,10 +93,10 @@ def _stamp(moment):
     return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _rejected(request, warnings, error, moment, code=2):
-    """A job refused before it started: no job id, exit 2 (130 when it was interrupted; SPEC FR1.7)."""
+def _rejected(request, warnings, error, moment, code=2, status="failed"):
+    """A job refused before it started: no job id, exit 2 (130 with status `cancelled` when it was interrupted)."""
     counts = {"total": len(request.urls), "succeeded": 0, "failed": 0, "blocked": 0, "cancelled": 0, "skipped": 0}
-    result = {"schema_version": schema.SCHEMA_VERSION, "kind": "result", "job_id": None, "status": "failed",
+    result = {"schema_version": schema.SCHEMA_VERSION, "kind": "result", "job_id": None, "status": status,
               "started_at": _stamp(moment), "finished_at": _stamp(moment), "counts": counts,
               "limits_effective": request.limits_effective, "items": [], "warnings": warnings, "error": error}
     return result, code
@@ -152,6 +155,7 @@ class _Job:
         self.used = 0
         self.cancelled = self.timed_out = False
         self.stop_code = None  # a code that fails every item that follows
+        self.placed = None  # the file the current item has already put into files/
 
     def entry(self, index, spec, code=None, outcome=None, artifact=None, skipped=False):
         """The manifest item for an end state: a success (artifact), an error `code`, or `skipped`."""
@@ -196,6 +200,7 @@ class _Job:
         return self.download(index, spec)
 
     def download(self, index, spec):
+        self.placed = None
         try:
             part = self.writer.open("%04d" % index)
         except artifacts.ArtifactError:
@@ -205,8 +210,11 @@ class _Job:
             return self.entry(index, spec, "OUTPUT_PATH_BLOCKED")
         try:
             return self.fetch_and_place(index, spec, part)
-        except KeyboardInterrupt:  # anywhere between the open part and the placed file
+        except KeyboardInterrupt:  # anywhere between the open part and the end of the item
             self.writer.abort(part)
+            if self.placed is not None:  # the file was already placed: it must not outlive the cancelled item
+                with contextlib.suppress(OSError):
+                    os.remove(self.placed)
             self.cancelled = True
             return self.entry(index, spec, "CANCELLED")
 
@@ -246,6 +254,7 @@ class _Job:
         except Exception as exc:  # noqa: BLE001 - ArtifactError, a file taken away after the rename, anything else
             code = "OUTPUT_WRITE_FAILED" if isinstance(exc, (OSError, artifacts.ArtifactError)) else "TOOL_FAILED"
             return self.fail(index, spec, part, code, outcome)
+        self.placed = os.path.join(self.job_dir, *artifact["path"].split("/"))
         self.used += artifact["bytes"]
         return self.entry(index, spec, None, outcome, artifact)
 
@@ -253,12 +262,24 @@ class _Job:
 def _undo_job(job_dir):
     """A job refused after its folder was made: take away what this call made (os.rmdir/os.remove only: a
     junction is removed as a link, never followed, and a folder that is not empty stays)."""
-    for name in ("logs", ".tmp", "files", "manifest.json"):
-        path = os.path.join(job_dir, name)
-        with contextlib.suppress(OSError):
+    interrupted = False  # a Ctrl+C in here does not stop the cleanup; the caller is told
+    for name in ("logs", ".tmp", "files", "manifest.json", None):
+        path = job_dir if name is None else os.path.join(job_dir, name)
+        try:
             os.rmdir(path) if os.path.isdir(path) else os.remove(path)
-    with contextlib.suppress(OSError):
-        os.rmdir(job_dir)
+        except OSError:
+            pass
+        except KeyboardInterrupt:
+            interrupted = True
+    return interrupted
+
+
+def _refuse(request, warnings, job_dir, error, moment_of):
+    """Take the new job folder away and answer: a refusal (`error`), or `cancelled`/130 when `error` is None or a
+    Ctrl+C came during the cleanup."""
+    if _undo_job(job_dir) or error is None:
+        return _rejected(request, warnings, error_object("CANCELLED"), moment_of(), 130, "cancelled")
+    return _rejected(request, warnings, error, moment_of())
 
 
 def _start_job(request, env, deps, policy, warnings, moment_of):
@@ -290,6 +311,8 @@ def _start_job(request, env, deps, policy, warnings, moment_of):
             break
         except outroot.JobExists:
             continue  # never reuse or remove a folder that is already there: draw another id
+        except KeyboardInterrupt:  # create_job has already taken away what it made
+            return None, _rejected(request, warnings, error_object("CANCELLED"), moment_of(), 130, "cancelled")
         except (PathBlocked, outroot.WriteBlocked) as exc:
             return None, _rejected(request, warnings, _write_error(exc), moment_of())
     else:
@@ -307,13 +330,11 @@ def _start_job(request, env, deps, policy, warnings, moment_of):
         log = RunLog(job_dir, check)
         mf = manifest.ManifestWriter(job_dir, replace=deps.get("replace", os.replace), sleep=sleep, check=check)
         mf.start(job_id, _stamp(started), request.limits_effective, len(request.urls), warnings)
-    except KeyboardInterrupt:  # Ctrl+C while the job is being set up: take it away again, say so
-        _undo_job(job_dir)
-        return None, _rejected(request, warnings, error_object("INTERRUPTED"), moment_of(), 130)
+    except KeyboardInterrupt:  # Ctrl+C while the job is being set up: take it away again, say `cancelled`
+        return None, _refuse(request, warnings, job_dir, None, moment_of)
     except (PathBlocked, artifacts.ArtifactError, manifest.ManifestError, OSError) as exc:
-        _undo_job(job_dir)
         error = _write_error(exc) if isinstance(exc, PathBlocked) else error_object("OUTPUT_WRITE_FAILED")
-        return None, _rejected(request, warnings, error, moment_of())
+        return None, _refuse(request, warnings, job_dir, error, moment_of)
     return (job_dir, writer, mf, log), None
 
 
@@ -361,15 +382,19 @@ def run(request, env, deps=None):
     error, extra = None, []
     if manifest_failed:
         error, extra = error_object("OUTPUT_WRITE_FAILED"), ["manifest_not_updated"]
-    for _ in range(2):  # a Ctrl+C during the final write is taken once and the write is tried again
+    done = False
+    for _ in range(3):  # a Ctrl+C during the final write is taken and the write is tried again
         try:
             mf.finish(status, _stamp(moment_of()), error, extra, write=not manifest_failed)
+            done = True
             break
         except KeyboardInterrupt:
             job.cancelled, status = True, "cancelled"
         except manifest.ManifestError:
-            status = "failed"
+            status, done = "failed", True
             mf.finish(status, _stamp(moment_of()), error_object("OUTPUT_WRITE_FAILED"), ["manifest_not_updated"], write=False)
             break
+    if not done:  # interrupted every time: the memory copy is the result, and it says the file is not up to date
+        mf.finish(status, _stamp(moment_of()), error, extra + ["manifest_not_updated"], write=False)
     log.close()
     return mf.doc, JOB_EXIT[mf.doc["status"]]

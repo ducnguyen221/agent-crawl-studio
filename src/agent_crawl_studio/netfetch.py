@@ -23,6 +23,7 @@ import httpx
 from . import __version__, sniff, urlpolicy
 
 USER_AGENT = "agent-crawl-studio/%s (OpcOS local tool)" % __version__
+ALLOWED_REQUEST_HEADERS = ("host", "user-agent", "accept", "accept-encoding", "connection")
 REDIRECT_STATUSES = (301, 302, 303, 307, 308)
 HEADERS_KEPT = ("content-type", "content-disposition", "last-modified", "retry-after")
 MAX_HEADER_TEXT = 200
@@ -295,8 +296,11 @@ class _Run:
         self.headers = {}
 
     def outcome(self, status, code=None, reason=None, http_status=None, **extra):
-        retryable = code in ("TIMEOUT", "RATE_LIMITED") or (
-            code == "NETWORK_ERROR" and (reason != "http_status" or http_status >= 500))
+        if code == "NETWORK_ERROR":
+            # a 5xx may pass; a 4xx, a forbidden answer and a certificate that does not verify will not by themselves
+            retryable = http_status >= 500 if reason == "http_status" else reason not in ("forbidden", "tls_verify_failed")
+        else:
+            retryable = code in ("TIMEOUT", "RATE_LIMITED")
         return FetchOutcome(
             status=status, code=code, reason=reason, http_status=http_status, retryable=retryable,
             redirects=self.redirects, final_url=self.final_url,
@@ -348,10 +352,13 @@ class _Run:
 
     def send(self, client, url, timeout, left):
         """One GET on `client`, whatever the client was set up with: no redirect following, no authentication, and
-        the `Cookie` and `Authorization` headers a handed-over client may carry are taken off the request."""
+        no header beyond a fixed set (a handed-over client cannot add Cookie, Authorization, Proxy-Authorization..)."""
         request = client.build_request("GET", url, timeout=timeout, extensions={"deadline": time.monotonic() + left})
-        for name in ("cookie", "authorization"):
-            request.headers.pop(name, None)
+        for name in list(request.headers.keys()):  # only a fixed set of headers goes out, whatever the client carries
+            if name.lower() not in ALLOWED_REQUEST_HEADERS:
+                del request.headers[name]
+        request.headers["user-agent"] = USER_AGENT
+        request.headers["accept-encoding"] = "identity"
         return client.send(request, stream=True, auth=None, follow_redirects=False)
 
     def net_failure(self, exc):
@@ -361,8 +368,10 @@ class _Run:
 
     def read(self, response, target):
         status = response.status_code
-        if status in (401, 403):
+        if status in (401, 407):
             return self.outcome("failed", "AUTH_REQUIRED", http_status=status)
+        if status == 403:  # often a site refusing this kind of client, not a login that is missing
+            return self.outcome("failed", "NETWORK_ERROR", "forbidden", status)
         if status == 429:
             return self.outcome("failed", "RATE_LIMITED", http_status=status)
         if status != 200:  # 1xx, 204, any other 2xx (a partial 206 is not what was asked for), 3xx, 4xx, 5xx

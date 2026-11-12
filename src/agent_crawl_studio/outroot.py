@@ -347,7 +347,7 @@ def _make_levels(root, parent, attrs_of):
             except OSError:
                 raise WriteBlocked(0, "os_error") from None
             _no_reparse([level], attrs_of)
-    except Exception:
+    except BaseException:  # Ctrl+C included: what this call made is taken away again
         for level in reversed(made):
             try:
                 os.rmdir(level)
@@ -373,7 +373,7 @@ def create_job(root, job_id, *, attrs_of=default_attrs_of, **_unused):
             raise WriteBlocked(0, "os_error") from None
         made.append(job)
         post_create_check(job, root, attrs_of=attrs_of)
-    except Exception as exc:
+    except BaseException as exc:
         if not isinstance(exc, JobExists):
             for level in reversed(made):
                 try:
