@@ -264,3 +264,33 @@ def test_a_real_directory_symlink_is_a_reparse_point_and_is_blocked(world, tmp_p
         assert list(outside.iterdir()) == []
     finally:
         rmdir_link(link)
+
+
+# --- remaining branches ------------------------------------------------------------------------------------------------
+def test_without_a_userprofile_only_the_drive_root_counts_as_broad(world):
+    world["env"].pop("USERPROFILE")
+    assert "broad_root" not in resolve(world).warnings
+
+
+def test_an_os_error_above_the_root_is_write_blocked(world, monkeypatch):
+    got = resolve(world)
+
+    def refuse(path, *args, **kwargs):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(os, "makedirs", refuse)
+    with pytest.raises(outroot.WriteBlocked) as info:
+        outroot.create_job(got, JOB, **FAKES)
+    assert info.value.reason == "os_error"
+
+
+def test_a_cleanup_that_cannot_remove_a_level_still_reports_the_original_block(world, monkeypatch):
+    got = resolve(world, "a/b")
+
+    def stuck(path):
+        raise OSError("in use")
+
+    monkeypatch.setattr(os, "rmdir", stuck)
+    with pytest.raises(PathBlocked) as info:
+        outroot.create_job(got, JOB, attrs_of=lambda p: (0x410, 0xA0000003) if p.endswith("a") else None)
+    assert info.value.reason == "reparse"
