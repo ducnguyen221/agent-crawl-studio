@@ -357,8 +357,11 @@ class _Run:
         for name in list(request.headers.keys()):  # only a fixed set of headers goes out, whatever the client carries
             if name.lower() not in ALLOWED_REQUEST_HEADERS:
                 del request.headers[name]
+        request.headers["host"] = request.url.netloc.decode("ascii")  # from the URL, never from the client
         request.headers["user-agent"] = USER_AGENT
+        request.headers["accept"] = "*/*"
         request.headers["accept-encoding"] = "identity"
+        request.headers["connection"] = "keep-alive"
         return client.send(request, stream=True, auth=None, follow_redirects=False)
 
     def net_failure(self, exc):

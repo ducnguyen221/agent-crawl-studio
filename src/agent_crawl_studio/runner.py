@@ -155,7 +155,6 @@ class _Job:
         self.used = 0
         self.cancelled = self.timed_out = False
         self.stop_code = None  # a code that fails every item that follows
-        self.placed = None  # the file the current item has already put into files/
 
     def entry(self, index, spec, code=None, outcome=None, artifact=None, skipped=False):
         """The manifest item for an end state: a success (artifact), an error `code`, or `skipped`."""
@@ -200,7 +199,6 @@ class _Job:
         return self.download(index, spec)
 
     def download(self, index, spec):
-        self.placed = None
         try:
             part = self.writer.open("%04d" % index)
         except artifacts.ArtifactError:
@@ -212,9 +210,9 @@ class _Job:
             return self.fetch_and_place(index, spec, part)
         except KeyboardInterrupt:  # anywhere between the open part and the end of the item
             self.writer.abort(part)
-            if self.placed is not None:  # the file was already placed: it must not outlive the cancelled item
+            if part.placed is not None:  # the file was already placed: it must not outlive the cancelled item
                 with contextlib.suppress(OSError):
-                    os.remove(self.placed)
+                    os.remove(part.placed)
             self.cancelled = True
             return self.entry(index, spec, "CANCELLED")
 
@@ -254,7 +252,6 @@ class _Job:
         except Exception as exc:  # noqa: BLE001 - ArtifactError, a file taken away after the rename, anything else
             code = "OUTPUT_WRITE_FAILED" if isinstance(exc, (OSError, artifacts.ArtifactError)) else "TOOL_FAILED"
             return self.fail(index, spec, part, code, outcome)
-        self.placed = os.path.join(self.job_dir, *artifact["path"].split("/"))
         self.used += artifact["bytes"]
         return self.entry(index, spec, None, outcome, artifact)
 
@@ -265,12 +262,14 @@ def _undo_job(job_dir):
     interrupted = False  # a Ctrl+C in here does not stop the cleanup; the caller is told
     for name in ("logs", ".tmp", "files", "manifest.json", None):
         path = job_dir if name is None else os.path.join(job_dir, name)
-        try:
-            os.rmdir(path) if os.path.isdir(path) else os.remove(path)
-        except OSError:
-            pass
-        except KeyboardInterrupt:
-            interrupted = True
+        for _ in range(2):  # a step that was interrupted is tried once more
+            try:
+                os.rmdir(path) if os.path.isdir(path) else os.remove(path)
+                break
+            except OSError:
+                break
+            except KeyboardInterrupt:
+                interrupted = True
     return interrupted
 
 
@@ -292,6 +291,8 @@ def _start_job(request, env, deps, policy, warnings, moment_of):
             required_free=limits.required_free_bytes(request.limits_effective, len(request.urls)), **out_params)
     except WorkRootError:
         return None, _rejected(request, warnings, error_object("WORK_ROOT_UNKNOWN"), moment_of())
+    except KeyboardInterrupt:  # nothing was made yet
+        return None, _rejected(request, warnings, error_object("CANCELLED"), moment_of(), 130, "cancelled")
     except (PathBlocked, outroot.WriteBlocked, OSError) as exc:  # OSError: a probe of the place failed
         if isinstance(exc, PathBlocked):
             error = error_object("OUTPUT_PATH_BLOCKED", hint=exc.reason)
@@ -395,6 +396,18 @@ def run(request, env, deps=None):
             mf.finish(status, _stamp(moment_of()), error_object("OUTPUT_WRITE_FAILED"), ["manifest_not_updated"], write=False)
             break
     if not done:  # interrupted every time: the memory copy is the result, and it says the file is not up to date
-        mf.finish(status, _stamp(moment_of()), error, extra + ["manifest_not_updated"], write=False)
-    log.close()
+        for _ in range(3):
+            try:
+                mf.finish(status, _stamp(moment_of()), error, extra + ["manifest_not_updated"], write=False)
+                break
+            except KeyboardInterrupt:
+                status = "cancelled"
+        if mf.doc["status"] is None:  # even setting it in memory was interrupted every time
+            mf.doc["status"], mf.doc["finished_at"] = "cancelled", _stamp(moment_of())
+    for _ in range(2):
+        try:
+            log.close()
+            break
+        except KeyboardInterrupt:
+            pass
     return mf.doc, JOB_EXIT[mf.doc["status"]]
