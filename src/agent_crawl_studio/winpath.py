@@ -8,12 +8,17 @@ import unicodedata
 
 MAX_COMPONENT = 120
 MAX_PATH = 240
+# Room kept below a parent folder: a separator, the job id (22), the files folder and a file name (32).
+JOB_ID_LENGTH = 22
+FILE_SUBPATH = "\\files\\"
+FILE_NAME_ALLOWANCE = 32
+JOB_RESERVE = 1 + JOB_ID_LENGTH + len(FILE_SUBPATH) + FILE_NAME_ALLOWANCE
 
 REASONS = (
     "empty", "dot", "colon", "trailing", "bad_char", "device", "too_long", "short_name", "prefix", "drive_relative",
     "rooted", "dotdot", "separator", "not_absolute",
     # added by outroot
-    "not_in_allow_list", "forbidden_place", "cloud", "reparse", "outside_root",
+    "not_in_allow_list", "forbidden_place", "cloud", "cloud_unknown", "reparse", "outside_root", "lookalike",
 )
 
 _DEVICES = frozenset(
@@ -23,6 +28,8 @@ _DEVICES = frozenset(
 )
 _FORBIDDEN_CHARS = frozenset('<>"|?*')
 _SHORT = re.compile(r"~[0-9]")
+# characters that look like a path separator or a drive colon
+_SEPARATOR_LOOKALIKES = frozenset("＼∕⁄／：⧵∖﹨╱╲⧸꞉")
 
 
 class PathBlocked(Exception):
@@ -49,8 +56,12 @@ def check_component(name, user_supplied=True):
     if name.endswith(".") or name.endswith(" "):
         raise PathBlocked("trailing")
     for ch in name:
-        if ch in _FORBIDDEN_CHARS or unicodedata.category(ch) == "Cc":
+        if ch in _FORBIDDEN_CHARS or unicodedata.category(ch) in ("Cc", "Cf", "Cs", "Zl", "Zp"):
             raise PathBlocked("bad_char")
+        if ch in _SEPARATOR_LOOKALIKES:
+            raise PathBlocked("lookalike")
+    if user_supplied and unicodedata.normalize("NFKC", name) != name:
+        raise PathBlocked("lookalike")
     if name.split(".", 1)[0].rstrip(" ").upper() in _DEVICES:
         raise PathBlocked("device")
     if user_supplied and _SHORT.search(name):
@@ -63,7 +74,7 @@ def check_relative(text):
         check_component(part)
 
 
-def check_path(path, user_parts=()):
+def check_path(path, user_parts=(), reserve=0):
     """An absolute, already normalised path: no \\\\?\\ or \\\\.\\ prefix, a drive and a root, no `.`/`..`
     left, every part legal, at most 240 characters. Parts whose name is in `user_parts` also get the
     8.3 rule."""
@@ -76,7 +87,7 @@ def check_path(path, user_parts=()):
         raise PathBlocked("drive_relative")
     if not re.match(r"^[A-Za-z]:\\", flat):
         raise PathBlocked("rooted" if flat.startswith("\\") else "not_absolute")
-    if len(flat.rstrip("\\")) > MAX_PATH:
+    if len(flat.rstrip("\\")) + reserve > MAX_PATH:
         raise PathBlocked("too_long")
     mine = {name.lower() for name in user_parts}
     for part in flat[3:].split("\\"):
