@@ -111,7 +111,8 @@ def test_ctrl_c_while_the_job_is_being_set_up_removes_the_job_and_says_interrupt
         calls.append(dst)
         interrupt()
     result, code = go(world, server, [server.url("/ok")], deps={"replace": replace})
-    assert code == 130 and result["job_id"] is None and result["error"]["code"] == "INTERRUPTED"
+    assert code == 130 and result["job_id"] is None and result["error"]["code"] == "CANCELLED"
+    assert result["status"] == "cancelled"  # RF202: 130 goes with `cancelled` only (FR1.7)
     assert os.listdir(os.path.join(world["work"], "jobs")) == []  # no job folder, no temp manifest left behind
 
 

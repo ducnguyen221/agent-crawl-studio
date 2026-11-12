@@ -537,7 +537,7 @@ def test_the_final_url_is_reported_redacted(nf, no_socket):
 
 # ----------------------------------------------------------------------------- HTTP status mapping (FR3.3)
 @pytest.mark.parametrize("code, error, retryable", [
-    (401, "AUTH_REQUIRED", False), (403, "AUTH_REQUIRED", False), (429, "RATE_LIMITED", True),
+    (401, "AUTH_REQUIRED", False), (407, "AUTH_REQUIRED", False), (429, "RATE_LIMITED", True),
     (404, "NETWORK_ERROR", False), (410, "NETWORK_ERROR", False), (418, "NETWORK_ERROR", False),
     (500, "NETWORK_ERROR", True), (502, "NETWORK_ERROR", True), (503, "NETWORK_ERROR", True),
 ])
