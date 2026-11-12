@@ -318,6 +318,8 @@ def _strip_userinfo(text):
     ends = [i for i in (rest.find(mark) for mark in "/?#") if i != -1]
     naive = rest[:min(ends)] if ends else rest
     if "@" in naive:
+        if "@" in rest[len(naive):]:  # a password holding "@" and a delimiter: where it ends cannot be known
+            return None
         rest = rest[naive.rfind("@") + 1:]
     elif "@" in rest and _USER_PASSWORD.match(naive):  # "user:pa?ss@host": the delimiter is inside the password
         rest = rest[rest.rfind("@") + 1:]
