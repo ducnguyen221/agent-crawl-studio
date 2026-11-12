@@ -4,10 +4,12 @@ Any reader sees a complete, valid document at any moment. Text that came from th
 import contextlib
 import json
 import os
+import secrets
 import time
 import unicodedata
 
 from .artifacts import RETRY_DELAYS, retry_io  # noqa: F401 - RETRY_DELAYS is part of this module's contract
+from .winpath import PathBlocked
 
 MAX_UNTRUSTED = 200
 STATUSES = ("succeeded", "failed", "blocked", "cancelled", "skipped")
@@ -32,9 +34,10 @@ def clean_untrusted(values):
 
 
 class ManifestWriter:
-    def __init__(self, job_dir, *, replace=os.replace, sleep=time.sleep):
+    def __init__(self, job_dir, *, replace=os.replace, sleep=time.sleep, check=None, token_of=None):
         self.path = os.path.join(job_dir, "manifest.json")
-        self._replace, self._sleep = replace, sleep
+        self._replace, self._sleep, self._check = replace, sleep, check
+        self._token_of = token_of or (lambda: secrets.token_hex(4))
         self.doc = None
         self._total = 0
 
@@ -46,14 +49,20 @@ class ManifestWriter:
         return counts
 
     def _write(self):
-        temp = self.path + ".tmp"
+        temp = "%s.%s.tmp" % (self.path, self._token_of())  # unique, and created exclusively: never someone else's file
+        made = False
         try:
-            with open(temp, "wb") as handle:
+            fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
+            made = True
+            with os.fdopen(fd, "wb") as handle:
                 handle.write(json.dumps(self.doc, ensure_ascii=True).encode("ascii"))
+            if self._check is not None:
+                self._check(temp)
             retry_io(lambda: self._replace(temp, self.path), self._sleep)
-        except OSError:
-            with contextlib.suppress(OSError):
-                os.remove(temp)
+        except (OSError, PathBlocked):
+            if made:
+                with contextlib.suppress(OSError):
+                    os.remove(temp)
             raise ManifestError() from None
 
     def start(self, job_id, started_at, limits_effective, total, warnings=()):
@@ -64,10 +73,11 @@ class ManifestWriter:
         self.doc["counts"] = self._counts()
         self._write()
 
-    def add_item(self, item):
+    def add_item(self, item, write=True):
         self.doc["items"].append(item)
         self.doc["counts"] = self._counts()
-        self._write()
+        if write:
+            self._write()
 
     def finish(self, status, finished_at, error=None, warnings=(), write=True):
         self.doc["status"], self.doc["finished_at"] = status, finished_at

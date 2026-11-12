@@ -104,19 +104,35 @@ def _write_error(exc):
         "OUTPUT_WRITE_FAILED", hint=getattr(exc, "hint", None))
 
 
-def _log(job_dir, line):
-    """One line per item in logs/run.log, best effort; text from the source never reaches it unclean."""
-    with contextlib.suppress(OSError):
-        os.makedirs(os.path.join(job_dir, "logs"), exist_ok=True)
-        with open(os.path.join(job_dir, "logs", "run.log"), "a", encoding="utf-8") as handle:
-            handle.write(manifest.untrusted_text(line) + "\n")
+class RunLog:
+    """logs/run.log: one line per item. The folder is made and checked here (a junction in its place refuses the
+    job); the file is created exclusively and checked once; after that, any trouble just stops the logging."""
+
+    def __init__(self, job_dir, check):
+        self.directory = os.path.join(job_dir, "logs")
+        self.path = os.path.join(self.directory, "run.log")
+        self._check, self._started, self._dead = check, False, False
+        os.mkdir(self.directory)
+        check(self.directory)
+
+    def write(self, line):
+        if self._dead:
+            return
+        try:
+            with open(self.path, "a" if self._started else "x", encoding="utf-8", newline="\n") as handle:
+                handle.write(manifest.untrusted_text(line) + "\n")
+            if not self._started:
+                self._started = True
+                self._check(self.path)
+        except (OSError, PathBlocked):
+            self._dead = True
 
 
 class _Job:
     """The state of one run: which item is next, what has been used, and why the rest must stop."""
 
-    def __init__(self, request, deps, policy, writer, manifest_writer, job_dir):
-        self.request, self.policy, self.writer, self.manifest, self.job_dir = request, policy, writer, manifest_writer, job_dir
+    def __init__(self, request, deps, policy, writer, job_dir):
+        self.request, self.policy, self.writer, self.job_dir = request, policy, writer, job_dir
         self.limits = request.limits_effective
         self.clock = deps.get("clock", time.monotonic)
         self.fetch = deps.get("fetch") or netfetch.fetch_item
@@ -126,11 +142,11 @@ class _Job:
         self.cancelled = self.timed_out = False
         self.stop_code = None  # a code that fails every item that follows
 
-    def entry(self, index, spec, code=None, outcome=None, artifact=None):
-        """The manifest item for an end state: a success (artifact), or an error `code`."""
+    def entry(self, index, spec, code=None, outcome=None, artifact=None, skipped=False):
+        """The manifest item for an end state: a success (artifact), an error `code`, or `skipped`."""
         entry = {"id": "%04d" % index, "url_redacted": urlpolicy.redact(spec.url),
                  "url_sha256": urlpolicy.url_sha256(spec.url, self.policy), "adapter": None,
-                 "status": "succeeded", "artifacts": [], "untrusted": {}}
+                 "status": "skipped" if skipped else "succeeded", "artifacts": [], "untrusted": {}}
         if artifact is not None:
             entry["adapter"] = "direct-http"
             entry["artifacts"] = [artifact]
@@ -169,12 +185,29 @@ class _Job:
         return self.download(index, spec)
 
     def download(self, index, spec):
-        item_id = "%04d" % index
         try:
-            part = self.writer.open(item_id)
+            part = self.writer.open("%04d" % index)
         except artifacts.ArtifactError:
             return self.entry(index, spec, "OUTPUT_WRITE_FAILED")
-        room = max(self.free_bytes_of(self.job_dir) - FREE_RESERVE, 0)
+        except PathBlocked:
+            self.stop_code = "OUTPUT_PATH_BLOCKED"
+            return self.entry(index, spec, "OUTPUT_PATH_BLOCKED")
+        try:
+            return self.fetch_and_place(index, spec, part)
+        except KeyboardInterrupt:  # anywhere between the open part and the placed file
+            self.writer.abort(part)
+            self.cancelled = True
+            return self.entry(index, spec, "CANCELLED")
+
+    def fail(self, index, spec, part, code, outcome=None):
+        self.writer.abort(part)
+        return self.entry(index, spec, code, outcome)
+
+    def fetch_and_place(self, index, spec, part):
+        try:
+            room = max(self.free_bytes_of(self.job_dir) - FREE_RESERVE, 0)
+        except Exception as exc:  # noqa: BLE001 - a probe that fails fails this item, not the job
+            return self.fail(index, spec, part, "OUTPUT_WRITE_FAILED" if isinstance(exc, OSError) else "TOOL_FAILED")
 
         def sink(chunk):
             if part.bytes + len(chunk) > room:
@@ -185,35 +218,40 @@ class _Job:
             outcome = self.fetch(spec.url, spec.expect, self.limits, sink, self.policy,
                                  total_remaining=max(self.limits["max_total_bytes"] - self.used, 0),
                                  clock=self.clock, job_deadline=self.deadline)
-        except KeyboardInterrupt:
-            self.writer.abort(part)
-            self.cancelled = True
-            return self.entry(index, spec, "CANCELLED")
         except (OSError, outroot.WriteBlocked):  # the disk, not the network
-            self.writer.abort(part)
-            return self.entry(index, spec, "OUTPUT_WRITE_FAILED")
+            return self.fail(index, spec, part, "OUTPUT_WRITE_FAILED")
         except Exception:  # noqa: BLE001 - an unexpected failure fails this item only; its text is never kept
-            self.writer.abort(part)
-            return self.entry(index, spec, "TOOL_FAILED")
+            return self.fail(index, spec, part, "TOOL_FAILED")
         if outcome.status != "ok":
-            self.writer.abort(part)
             if outcome.code == "TIMEOUT" and self.clock() >= self.deadline:
                 self.timed_out = True
-            return self.entry(index, spec, outcome.code, outcome)
+            return self.fail(index, spec, part, outcome.code, outcome)
         try:
             artifact = self.writer.commit(part, content_type=outcome.headers_clean.get("content-type"),
                                           source_url_redacted=outcome.final_url_redacted, host_url=outcome.final_url_redacted)
-        except artifacts.ArtifactError:
-            return self.entry(index, spec, "OUTPUT_WRITE_FAILED", outcome)
         except PathBlocked:
             self.stop_code = "OUTPUT_PATH_BLOCKED"
-            return self.entry(index, spec, "OUTPUT_PATH_BLOCKED", outcome)
+            return self.fail(index, spec, part, "OUTPUT_PATH_BLOCKED", outcome)
+        except Exception as exc:  # noqa: BLE001 - ArtifactError, a file taken away after the rename, anything else
+            code = "OUTPUT_WRITE_FAILED" if isinstance(exc, (OSError, artifacts.ArtifactError)) else "TOOL_FAILED"
+            return self.fail(index, spec, part, code, outcome)
         self.used += artifact["bytes"]
         return self.entry(index, spec, None, outcome, artifact)
 
 
+def _undo_job(job_dir):
+    """A job refused after its folder was made: take away what this call made (os.rmdir/os.remove only: a
+    junction is removed as a link, never followed, and a folder that is not empty stays)."""
+    for name in ("logs", ".tmp", "files", "manifest.json"):
+        path = os.path.join(job_dir, name)
+        with contextlib.suppress(OSError):
+            os.rmdir(path) if os.path.isdir(path) else os.remove(path)
+    with contextlib.suppress(OSError):
+        os.rmdir(job_dir)
+
+
 def _start_job(request, env, deps, policy, warnings, moment_of):
-    """Config, output place, job folder, writers. Returns (job pieces) or a refusal ((result, 2))."""
+    """Config, output place, job folder, writers. Returns (job pieces, None) or (None, (result, 2))."""
     try:
         cfg = config_mod.load_config(env)
         out_params = {key: deps[key] for key in OUTROOT_PARAMS if key in deps}
@@ -243,15 +281,36 @@ def _start_job(request, env, deps, policy, warnings, moment_of):
         return None, _rejected(request, warnings, error_object("OUTPUT_WRITE_FAILED", hint="job_id_taken"), moment_of())
     sleep = deps.get("sleep", time.sleep)
     realpath_args = {key: out_params[key] for key in ("attrs_of", "realpath") if key in out_params}
+
+    def check(path):
+        outroot.post_create_check(path, root, **realpath_args)
+
     try:
         writer = artifacts.ArtifactWriter(
             job_dir, rename=deps.get("rename", os.rename), motw=deps.get("motw", artifacts.set_motw), sleep=sleep,
-            check=lambda path: outroot.post_create_check(path, root, **realpath_args))
-        mf = manifest.ManifestWriter(job_dir, replace=deps.get("replace", os.replace), sleep=sleep)
+            check=check)
+        log = RunLog(job_dir, check)
+        mf = manifest.ManifestWriter(job_dir, replace=deps.get("replace", os.replace), sleep=sleep, check=check)
         mf.start(job_id, _stamp(started), request.limits_effective, len(request.urls), warnings)
-    except (artifacts.ArtifactError, manifest.ManifestError):
-        return None, _rejected(request, warnings, error_object("OUTPUT_WRITE_FAILED"), moment_of())
-    return (job_dir, writer, mf), None
+    except (PathBlocked, artifacts.ArtifactError, manifest.ManifestError, OSError) as exc:
+        _undo_job(job_dir)
+        error = _write_error(exc) if isinstance(exc, PathBlocked) else error_object("OUTPUT_WRITE_FAILED")
+        return None, _rejected(request, warnings, error, moment_of())
+    return (job_dir, writer, mf, log), None
+
+
+def _record(mf, log, job, entry):
+    """Log and add one item to the manifest. A Ctrl+C here cancels the job (it is taken once per step and the
+    step is repeated); the item is never lost: `add_item` puts it in memory before it writes."""
+    line = "%s %s %s %s" % (entry["id"], entry["status"], entry.get("error", {}).get("code", "-"), entry["url_redacted"])
+    steps = (lambda: log.write(line), lambda: None if any(item is entry for item in mf.doc["items"]) else mf.add_item(entry))
+    for step in steps:
+        for _ in range(2):
+            try:
+                step()
+                break
+            except KeyboardInterrupt:
+                job.cancelled = True
 
 
 def run(request, env, deps=None):
@@ -263,25 +322,31 @@ def run(request, env, deps=None):
     pieces, refusal = _start_job(request, env, deps, policy, list(request.warnings), moment_of)
     if refusal is not None:
         return refusal
-    job_dir, writer, mf = pieces
-    job = _Job(request, deps, policy, writer, mf, job_dir)
+    job_dir, writer, mf, log = pieces
+    job = _Job(request, deps, policy, writer, job_dir)
     manifest_failed = False
     for index, spec in enumerate(request.urls, 1):
+        if manifest_failed:  # nothing more is run, but the result still lists every item (SPEC FR3.5)
+            mf.add_item(job.entry(index, spec, skipped=True), write=False)
+            continue
         entry = job.next_item(index, spec)
-        _log(job_dir, "%s %s %s %s" % (entry["id"], entry["status"], entry.get("error", {}).get("code", "-"), entry["url_redacted"]))
         try:
-            mf.add_item(entry)
+            _record(mf, log, job, entry)
         except manifest.ManifestError:
             manifest_failed = True
-            break
     status = "failed" if (manifest_failed or job.timed_out) else schema.job_status(
         [item["status"] for item in mf.doc["items"]], cancelled=job.cancelled)
     error, extra = None, []
     if manifest_failed:
         error, extra = error_object("OUTPUT_WRITE_FAILED"), ["manifest_not_updated"]
-    try:
-        mf.finish(status, _stamp(moment_of()), error, extra, write=not manifest_failed)
-    except manifest.ManifestError:
-        status = "failed"
-        mf.finish(status, _stamp(moment_of()), error_object("OUTPUT_WRITE_FAILED"), ["manifest_not_updated"], write=False)
+    for _ in range(2):  # a Ctrl+C during the final write is taken once and the write is tried again
+        try:
+            mf.finish(status, _stamp(moment_of()), error, extra, write=not manifest_failed)
+            break
+        except KeyboardInterrupt:
+            job.cancelled, status = True, "cancelled"
+        except manifest.ManifestError:
+            status = "failed"
+            mf.finish(status, _stamp(moment_of()), error_object("OUTPUT_WRITE_FAILED"), ["manifest_not_updated"], write=False)
+            break
     return mf.doc, JOB_EXIT[mf.doc["status"]]

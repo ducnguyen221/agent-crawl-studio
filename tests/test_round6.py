@@ -299,3 +299,21 @@ def test_a_job_refused_after_its_folder_was_made_leaves_no_folder(world, server)
     result, code = go(world, server, [server.url("/ok")], deps={"replace": refuse})
     assert code == 2 and result["job_id"] is None
     assert os.listdir(os.path.join(world["work"], "jobs")) == []
+
+
+def test_a_second_ctrl_c_on_the_same_step_is_given_up_on_and_the_job_still_ends(world, server, monkeypatch):
+    monkeypatch.setattr(runner.RunLog, "write", lambda self, line: interrupt())  # every log write is interrupted
+    result, code = go(world, server, [server.url("/ok")] * 2)
+    assert code == 130 and result["status"] == "cancelled" and len(result["items"]) == 2
+
+
+def test_a_second_ctrl_c_in_the_final_write_leaves_the_memory_copy_as_the_result(world, server):
+    calls = []
+
+    def replace(src, dst):
+        calls.append(dst)
+        if len(calls) >= 3:  # the final write, twice
+            raise KeyboardInterrupt
+        os.replace(src, dst)
+    result, code = go(world, server, [server.url("/ok")], deps={"replace": replace})
+    assert code == 130 and result["status"] == "cancelled" and result["finished_at"]
