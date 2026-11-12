@@ -9,7 +9,7 @@ import sys
 import warnings
 
 from . import capabilities as cap
-from . import schema
+from . import schema, winpath
 from .errors import EXIT_FOR, ContractError, error_object
 
 # The whole public surface. No option here can weaken a policy (SPEC FR2.8).
@@ -26,7 +26,29 @@ def _usage(out, hint=USAGE):
     return 2
 
 
+REFUSED_NAME_REASONS = ("device", "colon", "bad_char", "trailing")
+
+
+def _special_path(path):
+    """True for a request path Windows would not treat as a plain file: device names (CON, NUL, COM1...),
+    streams (name:stream) and the device and extended prefixes. Such a path is never opened (opening CON
+    waits on the console)."""
+    flat = path.replace("/", "\\")
+    if flat.startswith("\\\\.") or flat.startswith("\\\\?"):
+        return True
+    for part in os.path.splitdrive(flat)[1].split("\\"):
+        if part:
+            try:
+                winpath.check_component(part, user_supplied=False)
+            except winpath.PathBlocked as exc:
+                if exc.reason in REFUSED_NAME_REASONS:
+                    return True
+    return False
+
+
 def _read_request(path):
+    if _special_path(path):
+        raise ContractError("INVALID_REQUEST", "$", "out_of_range")
     try:
         with open(path, "rb") as handle:
             return handle.read(schema.MAX_REQUEST_BYTES + 1)
