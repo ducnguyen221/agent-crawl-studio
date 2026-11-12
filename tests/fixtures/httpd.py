@@ -128,6 +128,15 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/short":  # /short?cl=1000&send=10
             self.head(200, [], _int(q, "cl", 1000), close=True)
             self.push(b"x" * _int(q, "send", 10))
+        elif path == "/chunked":  # /chunked?size=N&ext=M : one chunk of N bytes, M bytes of chunk extension
+            size, ext = _int(q, "size", 100), _int(q, "ext", 0)
+            self.head(200, [("Transfer-Encoding", "chunked"), ("Content-Type", "application/octet-stream")], close=True)
+            line = b"%x" % size + ((b";e=" + b"x" * ext) if ext else b"") + b"\r\n"
+            if self.push(line):
+                self.stream(size)
+                self.push(b"\r\n0\r\n\r\n")
+        elif path == "/bighdr":  # a response header of ?size bytes
+            self.head(200, [("X-Big", "h" * _int(q, "size", 100000))], 0)
         elif path == "/reset":
             self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
             self.connection.close()

@@ -20,6 +20,7 @@ import dataclasses
 import inspect
 import socket
 import ssl
+import sys
 import time
 from pathlib import Path
 
@@ -442,6 +443,8 @@ BAD_LOCATIONS = [
     "http://10.0.0.1/", "https://files.example.com:8443/x", "file:///c:/windows/win.ini", "ftp://files.example.com/x",
     "https://u:p@files.example.com/x", "http://files.example.com/x", "javascript:alert(1)", "https://files.example.com/a b",
     "https://files.example.com/a\\b", "http://intranet/",
+    "https://files.example.com/a\tb", "https://files.example.com/a\r\nX-Evil: 1", "/\\evil.example",
+    "https://127。" "0。" "0。" "1/", "https://@files.example.com/", "https://[fe80::1%251]/",
 ]
 
 
@@ -614,10 +617,10 @@ def test_a_body_shorter_than_content_length_is_a_truncated_body(nf, server):
     failed(out, "NETWORK_ERROR", "truncated_body", retryable=True)
 
 
-def test_a_body_longer_than_content_length_is_cut_with_a_warning(nf, server):
+def test_a_body_longer_than_content_length_is_cut_at_the_declared_length(nf, server):
+    """RF100: exactly N bytes are accepted; no warning (h11 drops the excess, nothing public reveals it)."""
     out, sink = fetch(nf, server.url("/bigcl?cl=10&size=50"), policy_for(server))
-    assert out.status == "ok" and sink.data == b"x" * 10 and out.bytes_received == 10
-    assert "body_longer_than_declared" in out.warnings
+    assert out.status == "ok" and sink.data == b"x" * 10 and out.bytes_received == 10 and out.warnings == []
 
 
 # ----------------------------------------------------------------------------- HTML instead of a binary (FR3.4)
@@ -654,6 +657,7 @@ def closed_port():
     return port
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="SPEC FR2.7: only Windows turns a closed loopback port into a timeout below ~2 s")
 def test_connect_timeout_on_a_closed_loopback_port_is_a_timeout_on_windows(nf, server, closed_port):
     started = time.monotonic()
     out, _ = fetch(nf, "http://pinned.example:%d/x" % closed_port, policy_for(server, extra_ports=(closed_port,)),
@@ -662,6 +666,7 @@ def test_connect_timeout_on_a_closed_loopback_port_is_a_timeout_on_windows(nf, s
     failed(out, "TIMEOUT", retryable=True)
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="the ~2.1 s refusal delay is the Windows behaviour measured in TK11")
 def test_a_closed_port_with_a_long_connect_timeout_is_connection_refused(nf, server, closed_port):
     """Windows reports the refusal after ~2.1 s (SPEC FR2.7): this test takes that long."""
     out, _ = fetch(nf, "http://pinned.example:%d/x" % closed_port, policy_for(server, extra_ports=(closed_port,)),

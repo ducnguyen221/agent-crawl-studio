@@ -72,6 +72,12 @@ def test_reset_stall_and_drip(server):
     assert time.monotonic() - started < 3
 
 
+def test_chunked_and_big_header_routes(server):
+    assert get(server, "/chunked?size=3000").content == b"x" * 3000
+    assert get(server, "/chunked?size=10&ext=100").content == b"x" * 10
+    assert len(get(server, "/bighdr?size=5000").headers["x-big"]) == 5000
+
+
 def test_redirect_route_and_cookie(server):
     got = get(server, "/redir?to=/ok&code=307&cookie=1", follow_redirects=False)
     assert got.status_code == 307 and got.headers["location"] == "/ok" and "hop=1" in got.headers["set-cookie"]
