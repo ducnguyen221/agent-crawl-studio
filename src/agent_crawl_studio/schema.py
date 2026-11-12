@@ -172,3 +172,22 @@ def validate_plan(obj):
                 continue
             problems += ["items[%d].%s" % (index, key) for key in PLAN_ITEM_KEYS if key not in item]
     return problems
+
+
+RESULT_KEYS = ("schema_version", "kind", "job_id", "status", "started_at", "finished_at", "counts", "limits_effective",
+               "items", "warnings")
+RESULT_ITEM_KEYS = ("id", "url_redacted", "url_sha256", "adapter", "status", "artifacts", "untrusted")
+
+
+def validate_result(obj):
+    """Problems found in a result / manifest object (an empty list when it has the documented shape)."""
+    if not isinstance(obj, dict):
+        return ["$"]
+    problems = [key for key in RESULT_KEYS if key not in obj]
+    if isinstance(obj.get("items"), list):
+        for index, item in enumerate(obj["items"]):
+            if not isinstance(item, dict):
+                problems.append("items[%d]" % index)
+                continue
+            problems += ["items[%d].%s" % (index, key) for key in RESULT_ITEM_KEYS if key not in item]
+    return problems

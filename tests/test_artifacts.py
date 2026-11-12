@@ -103,7 +103,7 @@ def test_part_counts_bytes_keeps_a_head_and_hashes_what_it_got(art, job):
     part = art.ArtifactWriter(str(job)).open("0001")
     for chunk in (b"%PDF", b"-1.7" + b"x" * 1000, b"tail"):
         part.write(chunk)
-    data = b"%PDF-1.7" + b"x" * 996 + b"tail"
+    data = b"%PDF-1.7" + b"x" * 1000 + b"tail"
     assert part.bytes == len(data) and part.sha256() == hashlib.sha256(data).hexdigest()
     assert part.head.startswith(b"%PDF-1.7") and len(part.head) <= 512
 
