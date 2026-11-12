@@ -142,6 +142,33 @@ class RunLog:
                 self._handle.close()
 
 
+def _entry(policy, index, spec, code=None, outcome=None, artifact=None, skipped=False):
+    """The manifest item for an end state: a success (artifact), an error `code`, or `skipped`."""
+    entry = {"id": "%04d" % index, "url_redacted": urlpolicy.redact(spec.url),
+             "url_sha256": urlpolicy.url_sha256(spec.url, policy), "adapter": None,
+             "status": "skipped" if skipped else "succeeded", "artifacts": [], "untrusted": {}}
+    if artifact is not None:
+        entry["adapter"] = "direct-http"
+        entry["artifacts"] = [artifact]
+    if outcome is not None:
+        entry["adapter"] = "direct-http"
+        raw = {name: outcome.headers_clean.get(header) for header, name in UNTRUSTED_HEADERS}
+        raw["final_url_redacted"] = outcome.final_url_redacted
+        entry["untrusted"] = manifest.clean_untrusted(raw)
+        if outcome.http_status is not None:
+            entry["http_status"] = outcome.http_status
+        if outcome.redirects:
+            entry["redirects"] = outcome.redirects
+    if code is not None:
+        entry["status"] = ITEM_STATUS_FOR[code]
+        reason = outcome.reason if outcome is not None and code in REASON_CODES and outcome.reason in REASONS else None
+        entry["error"] = item_error(
+            code, reason=reason, http_status=outcome.http_status if outcome is not None and code in (
+                "AUTH_REQUIRED", "RATE_LIMITED", "NETWORK_ERROR") else None,
+            retryable=outcome.retryable if outcome is not None and code == "NETWORK_ERROR" else None)
+    return entry
+
+
 class _Job:
     """The state of one run: which item is next, what has been used, and why the rest must stop."""
 
@@ -157,30 +184,7 @@ class _Job:
         self.stop_code = None  # a code that fails every item that follows
 
     def entry(self, index, spec, code=None, outcome=None, artifact=None, skipped=False):
-        """The manifest item for an end state: a success (artifact), an error `code`, or `skipped`."""
-        entry = {"id": "%04d" % index, "url_redacted": urlpolicy.redact(spec.url),
-                 "url_sha256": urlpolicy.url_sha256(spec.url, self.policy), "adapter": None,
-                 "status": "skipped" if skipped else "succeeded", "artifacts": [], "untrusted": {}}
-        if artifact is not None:
-            entry["adapter"] = "direct-http"
-            entry["artifacts"] = [artifact]
-        if outcome is not None:
-            entry["adapter"] = "direct-http"
-            raw = {name: outcome.headers_clean.get(header) for header, name in UNTRUSTED_HEADERS}
-            raw["final_url_redacted"] = outcome.final_url_redacted
-            entry["untrusted"] = manifest.clean_untrusted(raw)
-            if outcome.http_status is not None:
-                entry["http_status"] = outcome.http_status
-            if outcome.redirects:
-                entry["redirects"] = outcome.redirects
-        if code is not None:
-            entry["status"] = ITEM_STATUS_FOR[code]
-            reason = outcome.reason if outcome is not None and code in REASON_CODES and outcome.reason in REASONS else None
-            entry["error"] = item_error(
-                code, reason=reason, http_status=outcome.http_status if outcome is not None and code in (
-                    "AUTH_REQUIRED", "RATE_LIMITED", "NETWORK_ERROR") else None,
-                retryable=outcome.retryable if outcome is not None and code == "NETWORK_ERROR" else None)
-        return entry
+        return _entry(self.policy, index, spec, code, outcome, artifact, skipped)
 
     def next_item(self, index, spec):
         if self.cancelled:
@@ -199,20 +203,23 @@ class _Job:
         return self.download(index, spec)
 
     def download(self, index, spec):
+        part = None
         try:
-            part = self.writer.open("%04d" % index)
-        except artifacts.ArtifactError:
-            return self.entry(index, spec, "OUTPUT_WRITE_FAILED")
-        except PathBlocked:
-            self.stop_code = "OUTPUT_PATH_BLOCKED"
-            return self.entry(index, spec, "OUTPUT_PATH_BLOCKED")
-        try:
+            try:
+                part = self.writer.open("%04d" % index)
+            except artifacts.ArtifactError:
+                return self.entry(index, spec, "OUTPUT_WRITE_FAILED")
+            except PathBlocked:
+                self.stop_code = "OUTPUT_PATH_BLOCKED"
+                return self.entry(index, spec, "OUTPUT_PATH_BLOCKED")
             return self.fetch_and_place(index, spec, part)
-        except KeyboardInterrupt:  # anywhere between the open part and the end of the item
-            self.writer.abort(part)
-            if part.placed is not None:  # the file was already placed: it must not outlive the cancelled item
-                with contextlib.suppress(OSError):
-                    os.remove(part.placed)
+        except KeyboardInterrupt:  # anywhere from the opening of the part to the end of the item
+            if part is not None:
+                self.writer.abort(part)
+                if part.placed is not None:  # the file was already placed: it must not outlive the cancelled item
+                    with contextlib.suppress(OSError):
+                        os.remove(part.placed)
+            self.writer.discard(["%04d" % index])
             self.cancelled = True
             return self.entry(index, spec, "CANCELLED")
 
@@ -281,7 +288,7 @@ def _refuse(request, warnings, job_dir, error, moment_of):
     return _rejected(request, warnings, error, moment_of())
 
 
-def _start_job(request, env, deps, policy, warnings, moment_of):
+def _start_job(request, env, deps, policy, warnings, moment_of, state):
     """Config, output place, job folder, writers. Returns (job pieces, None) or (None, (result, 2))."""
     try:
         cfg = config_mod.load_config(env)
@@ -307,12 +314,17 @@ def _start_job(request, env, deps, policy, warnings, moment_of):
     for _ in range(JOB_ID_TRIES):
         started = moment_of()
         job_id = schema.new_job_id(started, token_of() if token_of else None)
+        candidate = os.path.join(root.parent, job_id)
+        existed = os.path.lexists(candidate)
         try:
             job_dir = create(root, job_id, **out_params)
+            state["job_dir"] = job_dir
             break
         except outroot.JobExists:
             continue  # never reuse or remove a folder that is already there: draw another id
-        except KeyboardInterrupt:  # create_job has already taken away what it made
+        except KeyboardInterrupt:  # create_job takes away what it made; if it had just finished, we do
+            if not existed:
+                _undo_job(candidate)
             return None, _rejected(request, warnings, error_object("CANCELLED"), moment_of(), 130, "cancelled")
         except (PathBlocked, outroot.WriteBlocked) as exc:
             return None, _rejected(request, warnings, _write_error(exc), moment_of())
@@ -328,8 +340,10 @@ def _start_job(request, env, deps, policy, warnings, moment_of):
         writer = artifacts.ArtifactWriter(
             job_dir, rename=deps.get("rename", os.rename), motw=deps.get("motw", artifacts.set_motw), sleep=sleep,
             check=check)
+        state["writer"] = writer
         log = RunLog(job_dir, check)
         mf = manifest.ManifestWriter(job_dir, replace=deps.get("replace", os.replace), sleep=sleep, check=check)
+        state["log"], state["mf"] = log, mf
         mf.start(job_id, _stamp(started), request.limits_effective, len(request.urls), warnings)
     except KeyboardInterrupt:  # Ctrl+C while the job is being set up: take it away again, say `cancelled`
         return None, _refuse(request, warnings, job_dir, None, moment_of)
@@ -353,13 +367,52 @@ def _record(mf, log, job, entry):
                 job.cancelled = True
 
 
+def _listed(doc):
+    """The file names a manifest lists."""
+    return {os.path.basename(artifact["path"]) for item in doc["items"] for artifact in item["artifacts"]}
+
+
+def _salvage(request, state, policy, moment_of):
+    """A Ctrl+C that no inner handler took, wherever it came. Before a manifest exists the job never started: take
+    away what was made and say `cancelled` (no job id). With a manifest: list the items not recorded yet as
+    cancelled and end the job as `cancelled`, unless it had already ended (then its own answer stands)."""
+    writer, mf, job_dir = state.get("writer"), state.get("mf"), state.get("job_dir")
+    if writer is not None:
+        writer.sweep()
+    if mf is None or mf.doc is None:
+        if job_dir is not None:
+            _undo_job(job_dir)
+        return _rejected(request, state["warnings"], error_object("CANCELLED"), moment_of(), 130, "cancelled")
+    if mf.doc["status"] is None:
+        for index, spec in enumerate(request.urls, 1):
+            if index > len(mf.doc["items"]):
+                writer.discard(["%04d" % index])  # a file placed for an item that was never recorded
+                mf.add_item(_entry(policy, index, spec, "CANCELLED"), write=False)
+        writer.reconcile(_listed(mf.doc))  # a manifest exists, so the writer does too
+        try:  # the file if it can be written, else the memory copy with a warning
+            mf.finish("cancelled", _stamp(moment_of()), None, [], write=True)
+        except (manifest.ManifestError, KeyboardInterrupt):
+            mf.finish("cancelled", _stamp(moment_of()), None, ["manifest_not_updated"], write=False)
+    state["log"].close()  # likewise
+    return mf.doc, JOB_EXIT[mf.doc["status"]]
+
+
 def run(request, env, deps=None):
     """Download the batch described by `request` into a new job folder. Returns (result, exit code); the result
-    is the final manifest. Items run one after another, in order; a failure of one never stops the others."""
+    is the final manifest. Items run one after another, in order; a failure of one never stops the others.
+    Ctrl+C never leaves `run`: it ends as `cancelled` (exit 130) with whatever exists, cleaned up."""
     deps = deps or {}
     policy = deps.get("policy") or urlpolicy.Policy()
     moment_of = deps.get("now") or (lambda: datetime.now(timezone.utc))
-    pieces, refusal = _start_job(request, env, deps, policy, list(request.warnings), moment_of)
+    state = {"warnings": list(request.warnings)}
+    try:
+        return _run(request, env, deps, policy, moment_of, state)
+    except KeyboardInterrupt:
+        return _salvage(request, state, policy, moment_of)
+
+
+def _run(request, env, deps, policy, moment_of, state):
+    pieces, refusal = _start_job(request, env, deps, policy, state["warnings"], moment_of, state)
     if refusal is not None:
         return refusal
     job_dir, writer, mf, log = pieces
@@ -373,11 +426,15 @@ def run(request, env, deps=None):
             entry = job.next_item(index, spec)
         except KeyboardInterrupt:  # anywhere in an item that its own handlers do not cover
             job.cancelled = True
+            writer.sweep()  # a .part opened just before the interrupt may not have reached its owner
+            writer.discard(["%04d" % index])
             entry = job.entry(index, spec, "CANCELLED")
         try:
             _record(mf, log, job, entry)
         except manifest.ManifestError:
             manifest_failed = True
+    if job.cancelled:  # an interrupted item may have left a finished file the manifest does not list
+        writer.reconcile(_listed(mf.doc))
     status = "failed" if (manifest_failed or job.timed_out) else schema.job_status(
         [item["status"] for item in mf.doc["items"]], cancelled=job.cancelled)
     error, extra = None, []

@@ -5,6 +5,7 @@ A name is `<item id>-<10 hex of the sha256>[-N].<extension>`: never a title, a U
 name. Nothing half-written is ever in `files/`, and a finished file is never overwritten by this code."""
 
 import contextlib
+import gc
 import hashlib
 import os
 import re
@@ -94,21 +95,51 @@ class ArtifactWriter:
 
     def open(self, item_id):
         path = os.path.join(self.tmp_dir, item_id + ".part")
-        try:
-            handle = open(path, "xb")  # exclusive: a leftover .part of the same id is an error, never overwritten
-        except OSError:
-            raise ArtifactError("part") from None
-        try:  # whatever happens from here on (Ctrl+C too): no handle and no .part are left behind
+        preexisting = os.path.lexists(path)  # a leftover .part of the same id is an error, never overwritten
+        handle = None
+        try:  # whatever happens in here (Ctrl+C at any line): no handle and no .part of ours are left behind
+            try:
+                handle = open(path, "xb")
+            except OSError:
+                raise ArtifactError("part") from None
             part = Part(item_id, path, handle)
             if self._check is not None:
                 self._check(path)
+            return part
         except BaseException:
-            with contextlib.suppress(OSError):
-                handle.close()
-            with contextlib.suppress(OSError):
-                os.remove(path)
+            if handle is not None:
+                with contextlib.suppress(OSError):
+                    handle.close()
+            if not preexisting:
+                with contextlib.suppress(OSError):
+                    os.remove(path)
             raise
-        return part
+
+    def discard(self, item_ids):
+        """Remove the finished files of items that never reached the manifest (their names start with the id)."""
+        with contextlib.suppress(OSError):
+            for name in os.listdir(self.files_dir):
+                if any(name.startswith(item_id + "-") for item_id in item_ids):
+                    with contextlib.suppress(OSError):
+                        os.remove(os.path.join(self.files_dir, name))
+
+    def reconcile(self, keep):
+        """After a cancelled run: remove every finished file that is not in `keep` (the names the manifest lists).
+        A handle that an interrupted write left dangling is freed first (a file in use cannot be removed)."""
+        gc.collect()
+        with contextlib.suppress(OSError):
+            for name in os.listdir(self.files_dir):
+                if name not in keep:
+                    with contextlib.suppress(OSError):
+                        os.remove(os.path.join(self.files_dir, name))
+
+    def sweep(self):
+        """Remove every .part of this job (after an interrupt nobody else can be writing them)."""
+        with contextlib.suppress(OSError):
+            for name in os.listdir(self.tmp_dir):
+                if name.endswith(".part"):
+                    with contextlib.suppress(OSError):
+                        os.remove(os.path.join(self.tmp_dir, name))
 
     def abort(self, part):
         part.close()

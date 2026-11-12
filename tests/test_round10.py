@@ -279,3 +279,31 @@ def test_artifact_writer_reconcile_discard_and_sweep(tmp_path):
     assert sorted(os.listdir(job / "files")) == ["0001-aaaa.pdf", "0003-cccc.bin"]
     writer.reconcile({"0001-aaaa.pdf"})
     assert os.listdir(job / "files") == ["0001-aaaa.pdf"]
+
+
+def test_ctrl_c_in_create_job_never_removes_a_folder_that_was_already_there(world, server):
+    from datetime import datetime, timezone
+    taken = os.path.join(world["work"], "jobs", "20261113-120000-abcdef")
+    os.makedirs(taken)
+    open(os.path.join(taken, "marker"), "w").close()
+
+    def create(root, job_id, **kwargs):
+        interrupt()
+    result, code = go(world, server, [server.url("/ok")], deps={
+        "create_job": create, "token_of": lambda: "abcdef", "now": lambda: datetime(2026, 11, 13, 12, 0, 0, tzinfo=timezone.utc)})
+    assert code == 130 and result["job_id"] is None and os.listdir(taken) == ["marker"]
+
+
+def test_the_safety_net_keeps_the_items_that_were_already_recorded(world, server, monkeypatch):
+    real = runner._record
+    calls = []
+
+    def record(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 2:
+            interrupt()  # outside _record's own handlers: the second item never reaches the manifest
+        return real(*args, **kwargs)
+    monkeypatch.setattr(runner, "_record", record)
+    result, code = go(world, server, [server.url("/ok")] * 3)
+    assert code == 130 and statuses(result) == ["succeeded", "cancelled", "cancelled"]
+    assert len(files_of(world, result)) == 1 and manifest_of(world, result) == result
