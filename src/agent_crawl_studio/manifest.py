@@ -50,11 +50,12 @@ class ManifestWriter:
 
     def _write(self):
         temp = "%s.%s.tmp" % (self.path, self._token_of())  # unique, and created exclusively: never someone else's file
-        made = done = False
+        preexisting = os.path.lexists(temp)  # only a fixed token (a test) can meet one: that file is left alone
+        done, fd, handle = False, None, None
         try:
             fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
-            made = True
-            with os.fdopen(fd, "wb") as handle:  # the same separators as the line on stdout
+            handle, fd = os.fdopen(fd, "wb"), None  # the handle owns the descriptor from here
+            with handle:  # the same separators as the line on stdout
                 handle.write(json.dumps(self.doc, ensure_ascii=True, separators=(",", ":")).encode("ascii"))
             if self._check is not None:
                 self._check(temp)
@@ -62,10 +63,15 @@ class ManifestWriter:
             done = True
         except (OSError, PathBlocked):
             raise ManifestError() from None
-        finally:  # also on Ctrl+C: our own temp file never outlives a failed write
-            if made and not done:
-                with contextlib.suppress(OSError):
-                    os.remove(temp)
+        finally:  # whatever ends the write early (Ctrl+C at any line): no descriptor and no temp file are left
+            if not done:
+                for closer in ((lambda: os.close(fd)) if fd is not None else None, handle.close if handle is not None else None):
+                    if closer is not None:
+                        with contextlib.suppress(OSError):
+                            closer()
+                if not preexisting:
+                    with contextlib.suppress(OSError):
+                        os.remove(temp)
 
     def start(self, job_id, started_at, limits_effective, total, warnings=()):
         self._total = total

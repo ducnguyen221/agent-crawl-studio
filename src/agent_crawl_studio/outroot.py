@@ -364,6 +364,7 @@ def create_job(root, job_id, *, attrs_of=default_attrs_of, **_unused):
     job = os.path.join(root.parent, job_id)
     winpath.check_path(job, reserve=len(winpath.FILE_SUBPATH) + winpath.FILE_NAME_ALLOWANCE)
     made = _make_levels(root, root.parent, attrs_of)
+    preexisting = os.path.lexists(job)
     try:
         try:
             os.mkdir(job)
@@ -373,12 +374,14 @@ def create_job(root, job_id, *, attrs_of=default_attrs_of, **_unused):
             raise WriteBlocked(0, "os_error") from None
         made.append(job)
         post_create_check(job, root, attrs_of=attrs_of)
+        return job
     except BaseException as exc:
         if not isinstance(exc, JobExists):
+            if not preexisting and job not in made:  # Ctrl+C between the mkdir and the bookkeeping
+                made.append(job)
             for level in reversed(made):
                 try:
                     os.rmdir(level)
                 except OSError:
                     pass
         raise
-    return job
