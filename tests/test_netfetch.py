@@ -424,7 +424,7 @@ def reply(status, body=b"", **headers):
 
 
 def redirect(to, code=302, **headers):
-    return reply(code, Location=to, **headers)
+    return reply(code, Location=to.encode("utf-8"), **headers)  # bytes: a header value may hold non-ASCII text
 
 
 def ok_body(content=b"data"):
