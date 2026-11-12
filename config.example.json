@@ -1,0 +1,12 @@
+{
+  "media_host_allowlist": [
+    "youtube.com",
+    "youtu.be",
+    "vimeo.com",
+    "soundcloud.com",
+    "tiktok.com"
+  ],
+  "output_roots": [
+    "workspaces/agent-crawl-studio"
+  ]
+}
