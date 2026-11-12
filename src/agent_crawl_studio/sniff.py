@@ -2,6 +2,7 @@
 CONTENT_MISMATCH lives here; the full signature table for artifacts belongs to the artifact manager."""
 
 import codecs
+import unicodedata
 
 BINARY_EXTENSIONS = frozenset(
     "pdf png jpg jpeg gif webp zip mp4 webm mp3 ogg wav docx xlsx pptx".split())
@@ -40,12 +41,16 @@ def extension_for(mime):
     return EXTENSIONS.get(mime, "bin")
 
 
+def _text_char(ch):
+    return ch.isprintable() or ch in "\t\n\r\x0c" or unicodedata.category(ch) == "Zs"  # a no-break space is text
+
+
 def _is_text(head):
     try:
-        text = codecs.getincrementaldecoder("utf-8")().decode(bytes(head), final=False)
+        text = codecs.getincrementaldecoder("utf-8")().decode(bytes(head).removeprefix(b"\xef\xbb\xbf"), final=False)
     except UnicodeDecodeError:
         return False
-    return bool(text) and all(ch.isprintable() or ch in "\t\n\r\x0c" for ch in text)
+    return bool(text) and all(_text_char(ch) for ch in text)
 
 
 def detect(head):
@@ -66,5 +71,5 @@ def detect(head):
     if looks_like_html(head):
         return "text/html"
     if _is_text(head):
-        return "application/json" if head.lstrip()[:1] in (b"{", b"[") else "text/plain"
+        return "application/json" if head.removeprefix(b"\xef\xbb\xbf").lstrip()[:1] in (b"{", b"[") else "text/plain"
     return _OCTET

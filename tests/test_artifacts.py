@@ -261,13 +261,14 @@ def test_the_check_runs_for_every_file_and_a_blocked_path_removes_it(art, job):
 
     def check(path):
         seen.append(path)
-        if len(seen) == 2:
+        if os.sep + "files" + os.sep in path and os.path.basename(path).startswith("0002"):  # the placed second file
             raise PathBlocked("reparse")
     writer = art.ArtifactWriter(str(job), check=check)
     put(art, writer, PDF, item="0001")
     with pytest.raises(PathBlocked):
         put(art, writer, PDF + b"2", item="0002")
-    assert len(seen) == 2 and all(os.path.isabs(p) and p.startswith(str(job)) for p in seen)
+    placed = [p for p in seen if os.sep + "files" + os.sep in p]
+    assert len(placed) == 2 and all(os.path.isabs(p) and p.startswith(str(job)) for p in seen)
     assert len(os.listdir(job / "files")) == 1 and os.listdir(job / ".tmp") == []
 
 

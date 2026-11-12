@@ -9,6 +9,7 @@ import hashlib
 import os
 import re
 import time
+import unicodedata
 
 import httpx
 
@@ -46,6 +47,7 @@ def retry_io(operation, sleep):
 
 def set_motw(path, host_url):
     """Mark-of-the-Web: the Zone.Identifier stream, ZoneId=3 (Internet)."""
+    host_url = "".join(ch for ch in host_url if unicodedata.category(ch) not in ("Cc", "Cf", "Cs", "Zl", "Zp"))
     with open(path + ":Zone.Identifier", "w", encoding="utf-8", newline="") as handle:
         handle.write("[ZoneTransfer]\r\nZoneId=3\r\nHostUrl=%s\r\n" % host_url)
 
@@ -85,6 +87,9 @@ class ArtifactWriter:
             os.makedirs(self.files_dir, exist_ok=True)
         except OSError:
             raise ArtifactError() from None
+        if check is not None:  # a junction in the place of either folder would send every file out of the job
+            check(self.tmp_dir)
+            check(self.files_dir)
 
     def open(self, item_id):
         path = os.path.join(self.tmp_dir, item_id + ".part")
@@ -92,7 +97,14 @@ class ArtifactWriter:
             handle = open(path, "xb")  # exclusive: a leftover .part of the same id is an error, never overwritten
         except OSError:
             raise ArtifactError("part") from None
-        return Part(item_id, path, handle)
+        part = Part(item_id, path, handle)
+        if self._check is not None:
+            try:
+                self._check(path)
+            except BaseException:
+                self.abort(part)
+                raise
+        return part
 
     def abort(self, part):
         part.close()
@@ -125,20 +137,20 @@ class ArtifactWriter:
         except ArtifactError:
             self.abort(part)
             raise
-        try:
+        warnings = []
+        try:  # whatever goes wrong from here on (even Ctrl+C) takes the placed file away again
             if os.path.getsize(target) != part.bytes:
                 raise ArtifactError("size")
             if self._check is not None:
                 self._check(target)
-        except Exception:
+            try:
+                self._motw(target, host_url)
+            except OSError:
+                warnings.append("motw_not_set")
+        except BaseException:
             with contextlib.suppress(OSError):
                 os.remove(target)
             raise
-        warnings = []
-        try:
-            self._motw(target, host_url)
-        except OSError:
-            warnings.append("motw_not_set")
         artifact = {"path": "files/" + name, "bytes": part.bytes, "sha256": part.sha256(), "mime": mime}
         declared = (content_type or "").split(";", 1)[0].strip().lower()
         if len(declared) <= MAX_DECLARED and DECLARED_TYPE.fullmatch(declared) and declared != mime:
