@@ -1,6 +1,7 @@
-"""SPEC FR6.2 (plan part), TK9: the real launcher scripts\crawl-studio.ps1 runs `plan --request` with the
-Python of the core venv, keeps odd characters in the request path, prints one JSON line, never opens a
-socket (the plan is checked offline) and creates nothing."""
+"""SPEC FR6.2 (plan part), TK9: the real launcher (scripts/crawl-studio.ps1) runs `plan --request` with the
+Python of the core venv, keeps odd characters in the request path, prints one JSON line, makes no network
+call (the plan is checked offline) and creates nothing. A missing venv exits 2 for `plan` and `run`
+(FR1.7: refused before running) and 0 for `capabilities` (SPR-01 contract)."""
 
 import json
 import os
@@ -19,13 +20,13 @@ pytestmark = pytest.mark.skipif(POWERSHELL is None, reason="PowerShell not avail
 URLS = ["https://www.rfc-editor.org/rfc/rfc9309.pdf", "http://127.0.0.1/", "http://2130706433/", "https://localhost/"]
 
 
-def run_launcher(request_path, work, fake_root=None, *words):
+def run_launcher(request_path, work, fake_root=None, *words, command="plan"):
     env = {k: v for k, v in os.environ.items() if k != "OPCOS_ROOT"}
     env["CRAWL_STUDIO_WORK"] = str(work)
     if fake_root is not None:
         env["OPCOS_ROOT"] = str(fake_root)
     return subprocess.run(
-        [POWERSHELL, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(LAUNCHER), "plan", "--request", str(request_path), *words],
+        [POWERSHELL, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(LAUNCHER), command, "--request", str(request_path), *words],
         capture_output=True, text=True, encoding="utf-8", env=env, timeout=180, stdin=subprocess.DEVNULL,
     )
 
@@ -63,9 +64,17 @@ def test_launcher_plan_of_an_invalid_request_exits_2_with_one_line(tmp_path):
     assert proc.returncode == 2 and obj["error"]["code"] == "INVALID_REQUEST"
 
 
-def test_launcher_plan_without_the_venv_still_prints_dependency_missing(tmp_path):
+@pytest.mark.parametrize("command", ["plan", "run"])
+def test_launcher_without_the_venv_prints_dependency_missing_and_exits_2_for_plan_and_run(tmp_path, command):
     request = tmp_path / "r.json"
     request.write_text(json.dumps({"schema_version": 1, "urls": URLS}), encoding="utf-8")
-    proc = run_launcher(request, tmp_path / "work", fake_root=tmp_path / "no-opcos")
+    proc = run_launcher(request, tmp_path / "work", fake_root=tmp_path / "no-opcos", command=command)
     obj = one_line(proc)
-    assert proc.returncode == 0 and obj["error"]["code"] == "DEPENDENCY_MISSING"
+    assert proc.returncode == 2 and obj["error"]["code"] == "DEPENDENCY_MISSING" and obj["venv"]["status"] == "missing"
+
+
+def test_launcher_without_the_venv_keeps_exit_0_for_capabilities(tmp_path):
+    proc = subprocess.run([POWERSHELL, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(LAUNCHER), "capabilities"],
+                          capture_output=True, text=True, encoding="utf-8", timeout=180, stdin=subprocess.DEVNULL,
+                          env=dict(os.environ, OPCOS_ROOT=str(tmp_path / "no-opcos")))
+    assert proc.returncode == 0 and one_line(proc)["error"]["code"] == "DEPENDENCY_MISSING"
