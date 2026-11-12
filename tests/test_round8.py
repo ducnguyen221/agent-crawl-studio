@@ -79,7 +79,8 @@ def test_ctrl_c_in_the_check_of_the_new_job_folder_leaves_no_folder_and_is_cance
     result, code = go(world, server, [server.url("/ok")], deps={
         "attrs_of": attrs, "now": lambda: datetime(2026, 11, 13, 12, 0, 0, tzinfo=timezone.utc), "token_of": lambda: "abcdef"})
     assert code == 130 and result["status"] == "cancelled" and result["error"]["code"] == "CANCELLED" and result["job_id"] is None
-    assert os.listdir(os.path.join(world["work"], "jobs")) == []
+    jobs = os.path.join(world["work"], "jobs")
+    assert not os.path.exists(jobs) or os.listdir(jobs) == []  # create_job took away the levels it had made too
 
 
 def test_a_second_ctrl_c_in_the_cleanup_still_ends_cancelled_and_finishes_the_cleanup(world, server, monkeypatch):

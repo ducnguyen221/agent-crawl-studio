@@ -97,13 +97,16 @@ class ArtifactWriter:
             handle = open(path, "xb")  # exclusive: a leftover .part of the same id is an error, never overwritten
         except OSError:
             raise ArtifactError("part") from None
-        part = Part(item_id, path, handle)
-        if self._check is not None:
-            try:
+        try:  # whatever happens from here on (Ctrl+C too): no handle and no .part are left behind
+            part = Part(item_id, path, handle)
+            if self._check is not None:
                 self._check(path)
-            except BaseException:
-                self.abort(part)
-                raise
+        except BaseException:
+            with contextlib.suppress(OSError):
+                handle.close()
+            with contextlib.suppress(OSError):
+                os.remove(path)
+            raise
         return part
 
     def abort(self, part):
