@@ -93,9 +93,20 @@ IPV6_FORMS = [
     "http://[::1%25eth0]/", "http://[fe80::1%eth0]/", "http://[::1/", "http://::1/", "http://[example.com]/", "http://[1.2.3.4]/",
     "http://[::1]x/", "http://[::1]:80x/", "http://[]/", "http://[:::1]/", "http://[::ffff:1.2.3]/", "http://[g::1]/",
 ]
+CHARACTERS += ["https://exa­mple.com/", "https://example.com/⁠", "https://example.com/‮", "https://example.com/‎",
+               "https://example.com/﻿", "https://exa‍mple.com/"]  # RF55: format characters (Cf) in the raw string
+NAMES += ["http://db.internal/", "http://x.home.arpa/", "http://nas.localdomain/", "http://A.INTERNAL./"]  # RF56
 BLOCKED_GROUPS = {
     "scheme": SCHEME, "userinfo": USERINFO, "characters": CHARACTERS, "ports": PORTS, "literals": LITERALS,
     "embedded": EMBEDDED, "ambiguous": AMBIGUOUS, "names": NAMES, "unicode": UNICODE, "ipv6_forms": IPV6_FORMS,
+}
+GROUP_REASONS = {  # RF54: the reason must be the right one for the group, not just any reason
+    "scheme": {"scheme", "empty_host"}, "userinfo": {"userinfo"}, "characters": {"bad_char", "too_long"},
+    "ports": {"bad_port", "port_not_allowed", "bad_authority"}, "literals": {"ip_not_public", "port_not_allowed"},
+    "embedded": {"ip_not_public"}, "ambiguous": {"ambiguous_host", "empty_host", "ip_not_public"},
+    "names": {"local_name", "single_label", "bad_label", "host_too_long", "bad_char", "percent_in_host", "userinfo", "bad_port"},
+    "unicode": {"ip_not_public", "local_name", "single_label", "idna", "bad_label", "bad_char"},
+    "ipv6_forms": {"bad_ip_literal", "bad_authority", "percent_in_host"},
 }
 BLOCKED = [(group, url) for group, urls in BLOCKED_GROUPS.items() for url in urls]
 
@@ -111,7 +122,7 @@ def test_allowed_url_is_normalised(raw, url, host, port, is_ip):
 def test_ssrf_group_is_blocked_with_url_blocked_and_a_fixed_reason(group, raw):
     with pytest.raises(Blocked) as info:
         check_url(raw)
-    assert info.value.code == "URL_BLOCKED" and info.value.reason in urlpolicy.BLOCK_REASONS
+    assert info.value.code == "URL_BLOCKED" and info.value.reason in GROUP_REASONS[group], info.value.reason
 
 
 def test_the_ssrf_groups_are_big_enough():
@@ -164,14 +175,6 @@ def test_for_ascii_urls_httpx_on_the_raw_text_reads_the_same_host_as_we_do():
             assert ipaddress.ip_address(theirs) == ipaddress.ip_address(host), raw
         else:
             assert theirs == host, raw
-
-
-def test_every_blocked_url_that_httpx_could_parse_is_still_blocked_by_us():
-    """The dangerous case is a URL httpx reads as a PUBLIC host while we read something else: nothing of the
-    blocked groups may be allowed; here we only record that no blocked URL slips through."""
-    for group, raw in BLOCKED:
-        with pytest.raises(Blocked):
-            check_url(raw)
 
 
 def test_a_parser_mismatch_is_url_blocked_not_a_crash(monkeypatch):
@@ -386,3 +389,85 @@ def test_url_sha256_differs_for_different_queries_and_hashes_blocked_text_too():
     blocked = url_sha256("http://127.0.0.1/")
     assert len(blocked) == 64 and blocked != url_sha256("http://127.0.0.2/")
     assert len(url_sha256("\ud800 not a url")) == 64 and len(url_sha256(None)) == 64
+
+
+# --- review round: RF50, RF51, RF52, RF53, RF57, RF59 ---------------------------------------------------------
+@pytest.mark.parametrize("raw", [
+    "https://user:pa?ss@a.com/x",
+    "https://user:pa/ss@a.com/x",
+    "https://user:pa#ss@a.com/x",
+    "https://user:p?a/s#s@a.com/x?k=v",
+    "https://user:pass@a.com/x",
+    "//user:pw@a.com/x",
+    "https://us@er:pw@a.com/x",
+])
+def test_redact_never_prints_a_password_even_when_it_holds_a_delimiter(raw):
+    out = redact(raw)
+    for secret in ("pa", "ss", "pw", "user", "us", "er"):
+        assert secret not in out.replace("a.com", "").replace("https", "").replace("/x", "").replace("REDACTED", ""), (raw, out)
+    assert "a.com" in out
+
+
+def test_redact_exact_outputs_for_the_delimiter_cases():
+    assert redact("https://user:pa?ss@a.com/x") == "https://a.com/x"
+    assert redact("https://user:pa/ss@a.com/x") == "https://a.com/x"
+    assert redact("https://user:pa#ss@a.com/x") == "https://a.com/x"
+    assert redact("//user:pw@a.com/x") == "//a.com/x"
+    assert redact("https://user:pw@a.com/x?k=v") == "https://a.com/x?k=REDACTED"
+
+
+def test_redact_keeps_a_legitimate_at_sign_in_the_path_or_query_and_a_port():
+    assert redact("https://a.com/@user/x") == "https://a.com/@user/x"
+    assert redact("https://a.com:443/p?e=x@y") == "https://a.com:443/p?e=REDACTED"
+    assert redact("https://a.com/p?e=x@y") == "https://a.com/p?e=REDACTED"
+
+
+def test_redact_gives_up_on_an_at_sign_it_cannot_parse():
+    assert redact("https://u:pw@/x") == "https://REDACTED/"
+    assert redact("user:pw@a.com/x") == "REDACTED"
+    assert "pw" not in redact("ftp:user:pw@a.com")
+
+
+def test_url_sha256_of_a_blocked_url_never_depends_on_its_password():
+    one = url_sha256("http://user:one@127.0.0.1/x")
+    assert one == url_sha256("http://user:two@127.0.0.1/x") == hashlib.sha256(b"http://127.0.0.1/x").hexdigest()
+    assert url_sha256("https://user:pa?ss@10.0.0.1/x") == url_sha256("https://user:other?word@10.0.0.1/x")
+    assert url_sha256("user:pw1@a.com/x") == url_sha256("user:pw2@a.com/x")
+
+
+def test_the_length_limit_is_checked_again_after_normalisation():
+    raw = "https://example.com/" + "\u00fc" * 500
+    assert len(raw) < 2048
+    with pytest.raises(Blocked) as info:
+        check_url(raw)
+    assert info.value.reason == "too_long"
+    assert len(check_url("https://example.com/" + "\u00fc" * 300).url) < 2048
+
+
+def test_the_normalised_url_is_the_only_text_ever_given_to_httpx(monkeypatch):
+    """RF57 (for Slice B, TK13): connect to NormalizedUrl.url, never to the raw text."""
+    seen = []
+    real = httpx.URL
+
+    def spy(text):
+        seen.append(text)
+        return real(text)
+
+    monkeypatch.setattr(urlpolicy.httpx, "URL", spy)
+    got = check_url("HTTPS://Example.COM:443/A?x=\u00e9#frag")
+    assert seen == [got.url] and got.url == "https://example.com/A?x=%C3%A9"
+
+
+def test_dns_probe_survives_errors_that_are_not_oserror():
+    def boom(*a, **k):
+        raise UnicodeError("label too long")
+
+    assert dns_probe("example.com", resolver=boom) == urlpolicy.DNS_FAIL
+    assert dns_probe("a" * 64 + ".com") == urlpolicy.DNS_FAIL  # a real resolver call: the IDNA codec refuses first
+    assert dns_probe("bad\ud800.com") == urlpolicy.DNS_FAIL
+
+
+def test_dns_probe_treats_a_malformed_answer_as_blocked():
+    assert dns_probe("example.com", resolver=lambda *a, **k: [("x",)]) == urlpolicy.DNS_BLOCKED
+    assert dns_probe("example.com", resolver=lambda *a, **k: [(0, 0, 0, "", None)]) == urlpolicy.DNS_BLOCKED
+    assert dns_probe("example.com", resolver=lambda *a, **k: [(0, 0, 0, "", ())]) == urlpolicy.DNS_BLOCKED
