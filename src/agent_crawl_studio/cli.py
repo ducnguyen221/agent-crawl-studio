@@ -26,15 +26,16 @@ def _usage(out, hint=USAGE):
     return 2
 
 
-REFUSED_NAME_REASONS = ("device", "colon", "bad_char", "trailing")
+BOM = b"\xef\xbb\xbf"
+REFUSED_NAME_REASONS =("device", "colon", "bad_char", "trailing")
 
 
 def _special_path(path):
-    """True for a request path Windows would not treat as a plain file: device names (CON, NUL, COM1...),
-    streams (name:stream) and the device and extended prefixes. Such a path is never opened (opening CON
-    waits on the console)."""
+    """True for a request path that must never be opened: any path that starts with two separators (a UNC
+    share, the extended and device prefixes: opening one reaches the network and leaks an NTLM hash), device
+    names (CON, NUL, COM1...) and streams (name:stream); opening CON waits on the console."""
     flat = path.replace("/", "\\")
-    if flat.startswith("\\\\.") or flat.startswith("\\\\?"):
+    if flat.startswith("\\\\"):
         return True
     for part in os.path.splitdrive(flat)[1].split("\\"):
         if part:
@@ -46,12 +47,19 @@ def _special_path(path):
     return False
 
 
+def _report_internal(exc):
+    """Only the CLASS name of an unexpected failure, on stderr: enough to find it, never its text."""
+    sys.stderr.write("internal error: %s\n" % type(exc).__name__)
+
+
 def _read_request(path):
     if _special_path(path):
         raise ContractError("INVALID_REQUEST", "$", "out_of_range")
     try:
         with open(path, "rb") as handle:
-            return handle.read(schema.MAX_REQUEST_BYTES + 1)
+            raw = handle.read(schema.MAX_REQUEST_BYTES + 1)
+        # Windows PowerShell 5.1 `Set-Content -Encoding UTF8` always writes a BOM: forgive exactly one
+        return raw[len(BOM):] if raw.startswith(BOM) and len(raw) <= schema.MAX_REQUEST_BYTES else raw
     except OSError:
         raise ContractError("INVALID_REQUEST", "$", "out_of_range") from None
 
@@ -90,15 +98,20 @@ def _valid(argv):
     return spec is not None and len(argv) == 1 + 2 * len(spec) and argv[1::2] == list(spec)
 
 
+def _warning_to_stderr(message, category, filename, lineno, file=None, line=None):
+    sys.stderr.write(warnings.formatwarning(message, category, filename, lineno, line))
+
+
 @contextlib.contextmanager
 def _quiet():
-    """Nothing but our own JSON line may reach stdout: library warnings are ignored, log records are
-    disabled and anything printed meanwhile goes to stderr."""
+    """Nothing but our own JSON line may reach stdout: library warnings become text on stderr (never an
+    exception, even under -W error), log records are disabled and anything printed meanwhile goes to stderr."""
     previous = logging.root.manager.disable
     logging.disable(logging.CRITICAL)
     try:
         with warnings.catch_warnings(), contextlib.redirect_stdout(sys.stderr):
-            warnings.simplefilter("ignore")
+            warnings.simplefilter("always")
+            warnings.showwarning = _warning_to_stderr
             yield
     finally:
         logging.disable(previous)
@@ -120,7 +133,8 @@ def main(argv, out=None, env=None, which=None, run=None, version_of=None, build=
         except KeyboardInterrupt:
             _emit(out, {"schema_version": schema.SCHEMA_VERSION, "error": error_object("INTERRUPTED")})
             return 130
-        except Exception:  # noqa: BLE001 - the text of an unexpected failure is never printed
+        except Exception as exc:  # noqa: BLE001 - the text of an unexpected failure is never printed
+            _report_internal(exc)
             _emit(out, {"schema_version": schema.SCHEMA_VERSION, "error": error_object("INTERNAL_ERROR")})
             return 1
 
@@ -136,7 +150,8 @@ def _capabilities(out, env, which, run, version_of, build):
     except KeyboardInterrupt:
         _emit(out, {"schema_version": cap.SCHEMA_VERSION, "error": error_object("INTERRUPTED")})
         return 130
-    except Exception:  # noqa: BLE001 - the text of an unexpected failure is never printed
+    except Exception as exc:  # noqa: BLE001 - the text of an unexpected failure is never printed
+        _report_internal(exc)
         _emit(out, {"schema_version": cap.SCHEMA_VERSION, "error": error_object("INTERNAL_ERROR")})
         return 1
     _emit(out, result)

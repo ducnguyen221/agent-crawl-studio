@@ -3,16 +3,19 @@
 # nothing is installed into the venv from the repo (opcos-runtime.json declares no install.package).
 # Usage: scripts\crawl-studio.ps1 <subcommand> [args...]
 # stdout is ONE JSON line. If the runtime tool or the venv is missing, this launcher prints a
-# DEPENDENCY_MISSING JSON line itself and exits 0 (it never installs anything, never looks for another Python).
+# DEPENDENCY_MISSING JSON line itself (it never installs anything, never looks for another Python): exit 0 for
+# `capabilities` (SPR-01 contract), exit 2 for `plan` and `run` (the request is refused before running, SPEC FR1.7).
 # Otherwise the exit code is the one of the Python process; decide success by $LASTEXITCODE.
 $ErrorActionPreference = 'Stop'
+$missingExit = 0
+if ($args.Count -gt 0 -and ($args[0] -eq 'plan' -or $args[0] -eq 'run')) { $missingExit = 2 }
 
 function Write-Missing {
     $line = '{"schema_version":1,"venv":{"status":"missing"},"error":{"code":"DEPENDENCY_MISSING",' +
         '"message":"A required dependency is missing; nothing was installed.",' +
         '"hint":"run: opcos-runtime ensure --repo-dir plugins/agent-crawl-studio"}}'
     [Console]::Out.WriteLine($line)
-    exit 0
+    exit $script:missingExit
 }
 
 $repo = Split-Path -Parent $PSScriptRoot
