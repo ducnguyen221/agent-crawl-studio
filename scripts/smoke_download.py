@@ -11,23 +11,21 @@ Anything else is FAIL OUTPUT_PATH_BLOCKED and nothing is created. The script its
 job folder `smoke-<yyyymmdd-hhmmss>-<6 random chars>` inside it (never reused); a `--work` that
 already has a component starting with "smoke-" is refused (no nesting).
 
-Network profile (SPR-01, "strict"): https only, port 443 only, no userinfo, host in ALLOWLIST (the
-ONE source of the allowed hosts in SPR-01; config.example.json only mirrors it and a test keeps
-them equal), and every address the host resolves to must be globally routable.
+Network profile (SPR-01, "strict"): https only, port 443 only, no userinfo, host in
+`config.DEFAULT_MEDIA_HOSTS` (the one list of allowed media hosts; config.example.json mirrors it and a test
+keeps them equal), and every address the host resolves to must be public (`urlpolicy.dns_probe`). The folder
+check is `outroot.confined_work`. This script carries no copy of any of these rules (SPEC FR6.1).
 RESIDUAL RISK (RK, to be closed in a later sprint by an egress proxy): the check covers the URL we
 pass and one DNS lookup. yt-dlp then follows HTTP redirects and makes its own lookups; a redirect
 to another host, or a DNS answer that changes after our probe, is NOT blocked here.
 """
 
 import argparse
-import ipaddress
 import json
 import os
 import secrets
 import shutil
-import socket
 import sys
-import threading
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -37,10 +35,10 @@ if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
 
 from agent_crawl_studio import capabilities as cap  # noqa: E402
-from agent_crawl_studio import envbuild, flags  # noqa: E402
+from agent_crawl_studio import config, envbuild, flags, outroot, urlpolicy  # noqa: E402
 from agent_crawl_studio.errors import error_object  # noqa: E402
+from agent_crawl_studio.urlpolicy import DNS_BLOCKED, DNS_FAIL, DNS_OK  # noqa: E402,F401
 
-ALLOWLIST = ("youtube.com", "youtu.be", "vimeo.com", "soundcloud.com", "tiktok.com")
 NETWORK_MARKERS = (
     "getaddrinfo failed",
     "name or service not known",
@@ -52,8 +50,6 @@ MAX_FILESIZE = "50M"
 SOCKET_TIMEOUT = 20
 ITEM_TIMEOUT = 45 * 60  # SPEC section 9: one media item may take up to 45 minutes
 PROBE_TIMEOUT = cap.PROBE_TIMEOUT
-DNS_TIMEOUT = 5
-DNS_OK, DNS_FAIL, DNS_BLOCKED = "ok", "unresolved", "blocked"
 
 
 class _Parser(argparse.ArgumentParser):
@@ -63,39 +59,6 @@ class _Parser(argparse.ArgumentParser):
 
 def default_rand():
     return secrets.token_hex(3)
-
-
-def _public(address):
-    """True only for a globally routable address (IPv4-mapped IPv6 is judged as its IPv4)."""
-    try:
-        ip = ipaddress.ip_address(address.split("%", 1)[0])
-    except ValueError:
-        return False
-    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
-        ip = ip.ipv4_mapped
-    return ip.is_global
-
-
-def default_dns_probe(host, timeout=DNS_TIMEOUT, resolver=socket.getaddrinfo):
-    """DNS_OK when the host resolves and EVERY address is global; DNS_BLOCKED when any is not;
-    DNS_FAIL when it does not resolve (or not within `timeout` seconds)."""
-    if not host:
-        return DNS_FAIL
-    box = {}
-
-    def lookup():
-        try:
-            box["infos"] = resolver(host, 443, proto=socket.IPPROTO_TCP)
-        except OSError:
-            box["infos"] = None
-
-    worker = threading.Thread(target=lookup, daemon=True)
-    worker.start()
-    worker.join(timeout)
-    infos = box.get("infos")
-    if not infos:
-        return DNS_FAIL
-    return DNS_OK if all(_public(info[4][0]) for info in infos) else DNS_BLOCKED
 
 
 def _emit(out, obj):
@@ -113,7 +76,7 @@ def _host_allowed(url):
         return None
     if port is not None and port != 443:
         return None
-    for domain in ALLOWLIST:
+    for domain in config.DEFAULT_MEDIA_HOSTS:  # the core's list, read at call time
         if host == domain or host.endswith("." + domain):
             return host
     return None
@@ -126,20 +89,6 @@ def _result(out, status, code=1, **extra):
     return code
 
 
-def _confined_work(arg, base_env):
-    """Return the resolved --work folder if it is under <work_root>/jobs, else None.
-    Raises cap.WorkRootError when the work root is unknown. Creates nothing."""
-    jobs_root = Path(os.path.realpath(os.path.join(cap.work_root(base_env), "jobs")))
-    work = Path(os.path.realpath(arg))
-    try:
-        relative = work.relative_to(jobs_root)
-    except ValueError:
-        return None
-    if any(part.lower().startswith("smoke-") for part in relative.parts):
-        return None
-    return work
-
-
 def main(argv, out=None, run=None, dns_probe=None, which=None, env=None, now=None, rand=None):
     out = out if out is not None else sys.stdout
     try:
@@ -150,7 +99,7 @@ def main(argv, out=None, run=None, dns_probe=None, which=None, env=None, now=Non
 
 def _main(argv, out, run, dns_probe, which, env, now, rand):
     run = run or cap.system_run
-    dns_probe = dns_probe or default_dns_probe
+    dns_probe = dns_probe or urlpolicy.dns_probe  # the core's probe, looked up at call time
     which = which or shutil.which
     base_env = env if env is not None else dict(os.environ)
     now = now or datetime.now
@@ -171,7 +120,7 @@ def _main(argv, out, run, dns_probe, which, env, now, rand):
         return _result(out, "FAIL", error=error_object("URL_BLOCKED"))
 
     try:
-        work = _confined_work(args.work, base_env)
+        work = outroot.confined_work(args.work, cap.work_root(base_env))
     except cap.WorkRootError:
         return _result(out, "FAIL", error=error_object("WORK_ROOT_UNKNOWN"))
     if work is None:

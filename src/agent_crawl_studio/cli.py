@@ -86,14 +86,19 @@ def _plan(out, env, args, plan_fn):
     return EXIT_FOR.get(error["code"]) or 2
 
 
-def _run(out, env, args):
+def _run(out, env, args, run_fn):
     try:
-        schema.parse_request(_read_request(args[2]))
+        request = schema.parse_request(_read_request(args[2]))
     except ContractError as exc:
         _emit(out, {"schema_version": schema.SCHEMA_VERSION, "kind": "result", "job_id": None, "status": "failed",
                     "error": error_object("INVALID_REQUEST", hint=exc.hint)})
         return 2
-    return _usage(out, hint="run is not available yet in this build")
+    if run_fn is None:
+        from . import runner  # imported late, like the planner: it needs the network and policy modules
+        run_fn = runner.run
+    result, code = run_fn(request, env)
+    _emit(out, result)
+    return code
 
 
 def _valid(argv):
@@ -121,7 +126,8 @@ def _quiet():
         logging.disable(previous)
 
 
-def main(argv, out=None, env=None, which=None, run=None, version_of=None, build=None, plan_fn=None):
+def main(argv, out=None, env=None, which=None, run=None, version_of=None, build=None, plan_fn=None,
+         run_fn=None):
     out = out if out is not None else sys.stdout
     argv = list(argv)
     if not _valid(argv):
@@ -133,7 +139,7 @@ def main(argv, out=None, env=None, which=None, run=None, version_of=None, build=
         try:
             if argv[0] == "plan":
                 return _plan(out, env, argv, plan_fn)
-            return _run(out, env, argv)
+            return _run(out, env, argv, run_fn)
         except KeyboardInterrupt:
             _emit(out, {"schema_version": schema.SCHEMA_VERSION, "error": error_object("INTERRUPTED")})
             return 130
