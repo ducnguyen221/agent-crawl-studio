@@ -68,13 +68,14 @@ EMBEDDED = [
     "https://[::ffff:127.0.0.1]/", "https://[::ffff:7f00:1]/", "https://[::ffff:0:127.0.0.1]/", "https://[::7f00:1]/",
     "https://[::a00:1]/", "https://[64:ff9b::7f00:1]/", "https://[64:ff9b::a00:1]/", "https://[2002:7f00:1::]/",
     "https://[2002:a00:1::]/", "https://[::ffff:169.254.169.254]/", "https://[::ffff:10.0.0.1]/", "https://[::808:808]/",
-    "https://[1::1]/", "https://[4000::1]/", "https://[fc00::1]/",
+    "https://[1::1]/", "https://[4000::1]/", "https://[fc00::1]/", "https://[::ffff:192.168.0.1]/",
+    "https://[64:ff9b::c0a8:1]/", "https://[2002:c0a8:1::]/",
 ]
 AMBIGUOUS = [
     "http://2130706433/", "http://0177.0.0.1/", "http://0x7f.0.0.1/", "http://0x7f000001/", "http://127.1/",
     "http://127.0.1/", "http://017700000001/", "http://1.1.1/", "http://01.1.1.1/", "http://1.1.1.256/",
     "http://1.1.1.1.1/", "http://example.123/", "http://0xff/", "http://1/", "http://127.0.0.1./", "http://0/",
-    "http://4294967295/", "http://0x7f.1/", "http://00.0.0.0/",
+    "http://4294967295/", "http://0x7f.1/", "http://00.0.0.0/", "http://0x/", "http://0X7F.0.0.1/", "http://:443/", "http://./",
 ]
 NAMES = [
     "http://localhost/", "http://LOCALHOST/", "http://localhost./", "http://foo.localhost/", "http://a.b.localhost/",
@@ -194,6 +195,18 @@ def test_a_port_mismatch_is_url_blocked(monkeypatch):
     monkeypatch.setattr(urlpolicy.httpx, "URL", Other)
     with pytest.raises(Blocked) as info:
         check_url("https://example.com/")
+    assert info.value.reason == "parser_mismatch"
+
+
+def test_an_ipv6_host_read_as_something_else_is_a_mismatch(monkeypatch):
+    class Other(httpx.URL):
+        @property
+        def raw_host(self):
+            return b"not-an-address"
+
+    monkeypatch.setattr(urlpolicy.httpx, "URL", Other)
+    with pytest.raises(Blocked) as info:
+        check_url("https://[2606:4700:4700::1111]/")
     assert info.value.reason == "parser_mismatch"
 
 
