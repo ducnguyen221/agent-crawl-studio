@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from agent_crawl_studio import capabilities as cap
-from agent_crawl_studio import flags
+from agent_crawl_studio import config, flags, urlpolicy
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("smoke_download", ROOT / "scripts" / "smoke_download.py")
@@ -405,17 +405,17 @@ def resolver_for(*addrs):
     ],
 )
 def test_dns_probe_classifies_addresses(addrs, expected):
-    assert smoke.default_dns_probe("www.youtube.com", resolver=resolver_for(*addrs)) == getattr(smoke, expected)
+    assert urlpolicy.dns_probe("www.youtube.com", resolver=resolver_for(*addrs)) == getattr(smoke, expected)
 
 
 def test_dns_probe_empty_host_and_no_answer_and_error():
-    assert smoke.default_dns_probe("") == smoke.DNS_FAIL
-    assert smoke.default_dns_probe("h", resolver=resolver_for()) == smoke.DNS_FAIL
+    assert urlpolicy.dns_probe("") == smoke.DNS_FAIL
+    assert urlpolicy.dns_probe("h", resolver=resolver_for()) == smoke.DNS_FAIL
 
     def boom(host, port, **kw):
         raise OSError("nxdomain")
 
-    assert smoke.default_dns_probe("h", resolver=boom) == smoke.DNS_FAIL
+    assert urlpolicy.dns_probe("h", resolver=boom) == smoke.DNS_FAIL
 
 
 def test_dns_probe_is_time_bounded():
@@ -424,7 +424,7 @@ def test_dns_probe_is_time_bounded():
         return [(2, 1, 6, "", ("8.8.8.8", port))]
 
     started = time.monotonic()
-    result = smoke.default_dns_probe("h", timeout=0.1, resolver=slow)
+    result = urlpolicy.dns_probe("h", timeout=0.1, resolver=slow)
     assert result == smoke.DNS_FAIL and time.monotonic() - started < 1.0
 
 
@@ -432,4 +432,4 @@ def test_dns_probe_is_time_bounded():
 
 def test_config_example_allowlist_matches_the_constant():
     cfg = json.loads((ROOT / "config.example.json").read_text(encoding="utf-8"))
-    assert tuple(cfg["media_host_allowlist"]) == smoke.ALLOWLIST
+    assert tuple(cfg["media_host_allowlist"]) == config.DEFAULT_MEDIA_HOSTS
