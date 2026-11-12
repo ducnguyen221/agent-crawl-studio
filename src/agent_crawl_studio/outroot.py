@@ -12,6 +12,7 @@ import ctypes
 import os
 import re
 import shutil
+from pathlib import Path
 from ctypes import wintypes
 from dataclasses import dataclass, field
 
@@ -312,6 +313,20 @@ def post_create_check(path, root, *, attrs_of=default_attrs_of, realpath=os.path
     if not _under(lexical, root.root) or not _under(realpath(lexical), realpath(root.root)):
         raise PathBlocked("outside_root")
     _no_reparse(_walk_down(root.root, lexical), attrs_of)
+
+
+def confined_work(arg, work_root, *, realpath=os.path.realpath):
+    """The resolved `arg` (links and junctions followed) when it is `<work_root>/jobs` or below, and does not sit
+    inside a `smoke-` folder already (no nesting); otherwise None. Creates nothing. Used by the smoke script."""
+    jobs_root = Path(realpath(os.path.join(work_root, "jobs")))
+    work = Path(realpath(arg))
+    try:
+        relative = work.relative_to(jobs_root)
+    except ValueError:
+        return None
+    if any(part.lower().startswith("smoke-") for part in relative.parts):
+        return None
+    return work
 
 
 def _make_levels(root, parent, attrs_of):
