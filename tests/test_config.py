@@ -69,7 +69,7 @@ def test_relative_root_without_an_opcos_base_is_ignored_with_a_warning(tmp_path)
     b'{"output_roots": [""]}', b'{"media_host_allowlist": [1]}', b'{"media_host_allowlist": "x"}',
     b'{"unknown_key": 1}', b'{"output_roots": [], "output_roots": []}', b"x" * (1024 * 1024 + 1),
     b'{"output_roots": ["a\\u0000b"]}',
-])
+], ids=lambda raw: repr(raw[:30]))
 def test_broken_file_gives_the_defaults_and_one_warning_without_echoing_content(content, tmp_path):
     put(tmp_path, content)
     cfg = config.load_config(env_for(tmp_path))
@@ -101,3 +101,9 @@ def test_opcos_root_comes_from_opcos_root_or_userprofile():
     assert config.opcos_root({"OPCOS_ROOT": "C:\\x"}) == "C:\\x"
     assert config.opcos_root({"USERPROFILE": "C:\\Users\\u"}) == os.path.join("C:\\Users\\u", "OpcOS")
     assert config.opcos_root({}) is None
+
+
+def test_several_relative_roots_without_an_opcos_base_give_one_warning(tmp_path):
+    put(tmp_path, {"output_roots": ["a/b", "c/d"]})
+    cfg = config.load_config({"CRAWL_STUDIO_WORK": str(tmp_path / "w")})
+    assert cfg.warnings == ["root_ignored"] and cfg.output_roots == [str(tmp_path / "w")]
