@@ -144,7 +144,11 @@ def one_object(text):
     return json.loads(text)
 
 
-@pytest.mark.parametrize("label,raw,why,path", INVALID, ids=[row[0] for row in INVALID])
+# RF72: the command line forgives ONE leading BOM (Windows PowerShell 5.1 writes one); schema.parse_request stays strict
+CLI_INVALID = [row for row in INVALID if row[0] != "UTF-8 BOM"]
+
+
+@pytest.mark.parametrize("label,raw,why,path", CLI_INVALID, ids=[row[0] for row in CLI_INVALID])
 def test_cli_plan_rejects_each_invalid_sample_with_one_json_line_exit_2_and_creates_nothing(label, raw, why, path, tmp_path):
     request = tmp_path / "request.json"
     request.write_bytes(raw)

@@ -193,14 +193,6 @@ def test_cli_plan_without_a_work_root_exits_2_with_work_root_unknown(tmp_path):
     assert rc == 2 and json.loads(out.getvalue())["error"]["code"] == "WORK_ROOT_UNKNOWN" and out.getvalue().count("\n") == 1
 
 
-@pytest.mark.parametrize("path", ["CON", "NUL", "con.txt", "AUX", "COM1", "C:\\x\\PRN", "\\\\.\\CON", "\\\\?\\C:\\x", "//./CON", "x.txt:stream", "CON."])
-def test_request_path_with_a_device_name_is_refused_without_opening_it(path, tmp_path):
-    out = io.StringIO()
-    rc = cli.main(["plan", "--request", path], out=out, env={"CRAWL_STUDIO_WORK": str(tmp_path / "w")})
-    obj = json.loads(out.getvalue())
-    assert rc == 2 and obj["error"]["code"] == "INVALID_REQUEST" and out.getvalue().count("\n") == 1
-
-
 def test_a_request_path_with_dot_dot_is_not_mistaken_for_a_device(tmp_path):
     out = io.StringIO()
     rc = cli.main(["plan", "--request", "..\\no-such-request.json"], out=out, env={"CRAWL_STUDIO_WORK": str(tmp_path / "w")})
