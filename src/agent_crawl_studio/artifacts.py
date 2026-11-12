@@ -124,6 +124,11 @@ class ArtifactWriter:
                 continue
             except OSError:
                 raise ArtifactError() from None
+            except BaseException:  # Ctrl+C: a rename that already happened must not leave its file behind
+                if not os.path.exists(part.path):
+                    with contextlib.suppress(OSError):
+                        os.remove(target)
+                raise
             return name, target
         raise ArtifactError("names")
 

@@ -63,7 +63,7 @@ class SlowInner:
 
     def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
         self.calls.append((host, timeout))
-        time.sleep(timeout)
+        time.sleep(timeout + 0.03)  # a little more than asked: the Windows timer may wake early (RF161)
         raise httpcore.ConnectTimeout("simulated")
 
 

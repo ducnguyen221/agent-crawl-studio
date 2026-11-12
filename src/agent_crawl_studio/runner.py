@@ -90,13 +90,13 @@ def _stamp(moment):
     return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _rejected(request, warnings, error, moment):
-    """A job refused before it started: no job id, exit 2 (SPEC FR1.7)."""
+def _rejected(request, warnings, error, moment, code=2):
+    """A job refused before it started: no job id, exit 2 (130 when it was interrupted; SPEC FR1.7)."""
     counts = {"total": len(request.urls), "succeeded": 0, "failed": 0, "blocked": 0, "cancelled": 0, "skipped": 0}
     result = {"schema_version": schema.SCHEMA_VERSION, "kind": "result", "job_id": None, "status": "failed",
               "started_at": _stamp(moment), "finished_at": _stamp(moment), "counts": counts,
               "limits_effective": request.limits_effective, "items": [], "warnings": warnings, "error": error}
-    return result, 2
+    return result, code
 
 
 def _write_error(exc):
@@ -111,7 +111,7 @@ class RunLog:
     def __init__(self, job_dir, check):
         self.directory = os.path.join(job_dir, "logs")
         self.path = os.path.join(self.directory, "run.log")
-        self._check, self._started, self._dead = check, False, False
+        self._check, self._handle, self._dead = check, None, False
         os.mkdir(self.directory)
         check(self.directory)
 
@@ -119,13 +119,24 @@ class RunLog:
         if self._dead:
             return
         try:
-            with open(self.path, "a" if self._started else "x", encoding="utf-8", newline="\n") as handle:
-                handle.write(manifest.untrusted_text(line) + "\n")
-            if not self._started:
-                self._started = True
+            if self._handle is None:  # created exclusively, checked once, then kept open: never reopened by path
+                self._handle = open(self.path, "x", encoding="utf-8", newline="\n")
                 self._check(self.path)
-        except (OSError, PathBlocked):
+            self._handle.write(manifest.untrusted_text(line) + "\n")
+            self._handle.flush()
+        except PathBlocked:  # the file we just made sits somewhere it must not: take it away, stop logging
             self._dead = True
+            self.close()
+            with contextlib.suppress(OSError):
+                os.remove(self.path)
+        except OSError:
+            self._dead = True
+            self.close()
+
+    def close(self):
+        if self._handle is not None:
+            with contextlib.suppress(OSError):
+                self._handle.close()
 
 
 class _Job:
@@ -260,9 +271,13 @@ def _start_job(request, env, deps, policy, warnings, moment_of):
             required_free=limits.required_free_bytes(request.limits_effective, len(request.urls)), **out_params)
     except WorkRootError:
         return None, _rejected(request, warnings, error_object("WORK_ROOT_UNKNOWN"), moment_of())
-    except (PathBlocked, outroot.WriteBlocked) as exc:
-        error = error_object("OUTPUT_PATH_BLOCKED", hint=exc.reason) if isinstance(exc, PathBlocked) else error_object(
-            "OUTPUT_WRITE_FAILED", hint="missing_gib=%d" % exc.missing_gib)
+    except (PathBlocked, outroot.WriteBlocked, OSError) as exc:  # OSError: a probe of the place failed
+        if isinstance(exc, PathBlocked):
+            error = error_object("OUTPUT_PATH_BLOCKED", hint=exc.reason)
+        elif isinstance(exc, outroot.WriteBlocked):
+            error = error_object("OUTPUT_WRITE_FAILED", hint="missing_gib=%d" % exc.missing_gib)
+        else:
+            error = error_object("OUTPUT_WRITE_FAILED")
         return None, _rejected(request, warnings, error, moment_of())
     warnings = warnings + [warning for warning in root.warnings if warning not in warnings]
     create = deps.get("create_job", outroot.create_job)
@@ -292,6 +307,9 @@ def _start_job(request, env, deps, policy, warnings, moment_of):
         log = RunLog(job_dir, check)
         mf = manifest.ManifestWriter(job_dir, replace=deps.get("replace", os.replace), sleep=sleep, check=check)
         mf.start(job_id, _stamp(started), request.limits_effective, len(request.urls), warnings)
+    except KeyboardInterrupt:  # Ctrl+C while the job is being set up: take it away again, say so
+        _undo_job(job_dir)
+        return None, _rejected(request, warnings, error_object("INTERRUPTED"), moment_of(), 130)
     except (PathBlocked, artifacts.ArtifactError, manifest.ManifestError, OSError) as exc:
         _undo_job(job_dir)
         error = _write_error(exc) if isinstance(exc, PathBlocked) else error_object("OUTPUT_WRITE_FAILED")
@@ -329,7 +347,11 @@ def run(request, env, deps=None):
         if manifest_failed:  # nothing more is run, but the result still lists every item (SPEC FR3.5)
             mf.add_item(job.entry(index, spec, skipped=True), write=False)
             continue
-        entry = job.next_item(index, spec)
+        try:
+            entry = job.next_item(index, spec)
+        except KeyboardInterrupt:  # anywhere in an item that its own handlers do not cover
+            job.cancelled = True
+            entry = job.entry(index, spec, "CANCELLED")
         try:
             _record(mf, log, job, entry)
         except manifest.ManifestError:
@@ -349,4 +371,5 @@ def run(request, env, deps=None):
             status = "failed"
             mf.finish(status, _stamp(moment_of()), error_object("OUTPUT_WRITE_FAILED"), ["manifest_not_updated"], write=False)
             break
+    log.close()
     return mf.doc, JOB_EXIT[mf.doc["status"]]
