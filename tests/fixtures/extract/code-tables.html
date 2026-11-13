@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>Sample tool reference</title></head><body>
+<nav><a href="/docs">Documentation index</a> <a href="/download">Download the tool</a></nav>
+<main>
+<h1>Reference for the sample tool settings</h1>
+<p>Every option below can be set in the file or on the command line.</p>
+<table><thead><tr><th>option</th><th>default</th><th>meaning</th></tr></thead><tbody><tr><td>timeout</td><td>30</td><td>seconds before a request is cancelled</td></tr><tr><td>retries</td><td>3</td><td>attempts after a temporary failure</td></tr><tr><td>limit</td><td>100</td><td>largest number of items in one run</td></tr><tr><td>mode</td><td>fast</td><td>fast or careful processing</td></tr><tr><td>output</td><td>result.json</td><td>file that receives the answer</td></tr><tr><td>verbose</td><td>off</td><td>print every step to the console</td></tr><tr><td>cache</td><td>on</td><td>keep a copy of each reply on disk</td></tr><tr><td>format</td><td>json</td><td>json or plain text answer</td></tr></tbody></table>
+<pre><code>settings = load_settings(path)
+if settings.retries &gt; 3:
+    settings.retries = 3
+for item in queue(limit=settings.limit):
+    result = process(item, mode=settings.mode)
+    write(result, settings.output)</code></pre>
+<table><thead><tr><th>code</th><th>name</th><th>action</th></tr></thead><tbody><tr><td>E1</td><td>NoFile</td><td>check the path</td></tr><tr><td>E2</td><td>Busy</td><td>retry later</td></tr><tr><td>E3</td><td>TooLarge</td><td>lower the limit</td></tr><tr><td>E4</td><td>Refused</td><td>ask the owner</td></tr></tbody></table>
+<pre><code>def retry(call, times):
+    for n in range(times):
+        try:
+            return call()
+        except TemporaryError:
+            wait(n * 2)
+    raise GiveUp()</code></pre>
+</main>
+<footer><p>Documentation version 4 for the sample tool.</p></footer>
+</body></html>
