@@ -82,19 +82,60 @@ def no_socket(monkeypatch):
     assert not calls, "socket use recorded: %r" % (calls,)
 
 
+def wait_for_resolver_slots(slots, count, timeout=5.0, clock=None, sleep=None):
+    """Wait, at most `timeout` seconds, until all `count` places of `slots` can be taken at once; then fail the test
+    that is about to start (FR16.5: a slot that never comes back is a leak, not something to run on top of)."""
+    import time
+    clock, sleep = clock or time.monotonic, sleep or time.sleep
+    deadline = clock() + timeout
+    while True:
+        got = [slots.acquire(blocking=False) for _ in range(count)]
+        for taken in got:
+            if taken:
+                slots.release()
+        if all(got):
+            return
+        if clock() >= deadline:
+            pytest.fail("resolver slots busy: %d of %d never came back within %g s" % (got.count(False), count, timeout),
+                        pytrace=False)
+        sleep(0.05)
+
+
 @pytest.fixture(autouse=True)
 def _every_resolver_slot_is_free():
     """RESOLVER_SLOTS is a process-wide bound; a test that leaves a slow lookup running must not make the next one
-    see fewer slots (RF343): wait, at most a few seconds, until all of them are back."""
-    import time
+    see fewer slots (RF343): wait, at most a few seconds, until all of them are back, else fail."""
     from agent_crawl_studio import netfetch
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline:
-        got = [netfetch.RESOLVER_SLOTS.acquire(blocking=False) for _ in range(netfetch.MAX_RESOLVER_THREADS)]
-        for taken in got:
-            if taken:
-                netfetch.RESOLVER_SLOTS.release()
-        if all(got):
-            break
-        time.sleep(0.05)
+    wait_for_resolver_slots(netfetch.RESOLVER_SLOTS, netfetch.MAX_RESOLVER_THREADS)
     yield
+
+
+def remove_junctions(paths):
+    """Take away the junctions and links in `paths` that are still there, deepest first: the link only, never what it
+    points at (`os.rmdir` does not follow it). A path that is gone, or is a plain folder, is left alone."""
+    import os
+    for path in sorted(set(paths), key=len, reverse=True):
+        try:
+            if getattr(os.lstat(path), "st_file_attributes", 0) & 0x400:
+                os.rmdir(path)
+        except OSError:
+            pass
+
+
+@pytest.fixture(autouse=True)
+def _no_junction_is_left_behind(monkeypatch):
+    """Every junction a test makes with `_winapi.CreateJunction` is removed (the link only) when the test ends,
+    whether or not the test cleans up itself (RQ-013: three were left in the temp folder)."""
+    if sys.platform != "win32":
+        yield
+        return
+    import _winapi
+    made, real = [], _winapi.CreateJunction
+
+    def create(target, link):
+        real(target, link)
+        made.append(link)
+
+    monkeypatch.setattr(_winapi, "CreateJunction", create)
+    yield
+    remove_junctions(made)

@@ -640,11 +640,14 @@ def test_tree_usage_counts_the_whole_item_folder_and_follows_no_junction(tmp_pat
     outside = tmp_path / "outside"
     outside.mkdir()
     (outside / "big").write_bytes(b"z" * 1000)
-    done = subprocess.run(["cmd", "/c", "mklink", "/J", os.path.join(dirs.cache, "link"), str(outside)],
-                          capture_output=True)
+    link = os.path.join(dirs.cache, "link")
+    done = subprocess.run(["cmd", "/c", "mklink", "/J", link, str(outside)], capture_output=True)
     assert done.returncode == 0
-    assert ytdlp.tree_usage(dirs.root) == (25, 5)
-    assert ytdlp.tree_usage(os.path.join(str(tmp_path), "missing")) == (0, 0)
+    try:
+        assert ytdlp.tree_usage(dirs.root) == (25, 5)
+        assert ytdlp.tree_usage(os.path.join(str(tmp_path), "missing")) == (0, 0)
+    finally:
+        os.rmdir(link)  # a link made with `mklink` is not the fixture's (FR16.5): the link only, never `outside`
 
 
 def test_size_watch_counts_what_is_written_outside_dl(tmp_path):

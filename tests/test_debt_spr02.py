@@ -309,3 +309,146 @@ def test_resolve_gives_the_slot_back_when_the_thread_never_starts(monkeypatch):
     else:
         raise AssertionError("the interrupt must go on")
     assert slots_free()
+
+
+# ----------------------------------------------------------------------------- SPR-03 TK28 (FR16.5, RQ-013 rest)
+import io  # noqa: E402
+
+import pytest  # noqa: E402
+
+from conftest import remove_junctions, wait_for_resolver_slots  # noqa: E402
+from test_run_batch import go, manifest_of, world  # noqa: E402,F401
+
+
+class _Slots:
+    """A stand-in for RESOLVER_SLOTS: `busy` of its `size` places are held and never come back."""
+
+    def __init__(self, size, busy):
+        self.free = size - busy
+
+    def acquire(self, blocking=False):
+        if self.free > 0:
+            self.free -= 1
+            return True
+        return False
+
+    def release(self):
+        self.free += 1
+
+
+def test_the_resolver_fixture_fails_the_test_when_a_slot_never_comes_back():
+    ticks = iter(range(1000))
+    with pytest.raises(pytest.fail.Exception, match="resolver slots busy"):
+        wait_for_resolver_slots(_Slots(8, busy=1), 8, timeout=3, clock=lambda: next(ticks), sleep=lambda seconds: None)
+
+
+def test_the_resolver_fixture_is_quiet_when_every_slot_is_free_or_comes_back():
+    wait_for_resolver_slots(_Slots(8, busy=0), 8, timeout=3)
+    late = _Slots(8, busy=1)
+    seen = []
+
+    def sleep(seconds):
+        seen.append(seconds)
+        late.release()  # the stuck lookup ends while the fixture waits
+
+    wait_for_resolver_slots(late, 8, timeout=3, sleep=sleep)
+    assert seen and late.free == 8
+
+
+def test_validate_result_reports_more_items_than_the_count_and_fewer():
+    doc = {key: None for key in schema.RESULT_KEYS}
+    item = {key: None for key in schema.RESULT_ITEM_KEYS}
+    doc.update(job_id="20261113-100000-aaaaaa", status="succeeded", counts={"total": 2}, warnings=[],
+               items=[dict(item), dict(item), dict(item)])
+    assert schema.validate_result(doc) == ["counts.total"]  # one item too many
+    doc["items"] = [dict(item)]
+    assert schema.validate_result(doc) == ["counts.total"]  # one too few, in a job that says it is finished
+    doc["items"] = [dict(item), dict(item)]
+    assert schema.validate_result(doc) == []
+    doc["status"] = None  # a job still running lists the items it has so far
+    doc["items"] = [dict(item)]
+    assert schema.validate_result(doc) == []
+
+
+@pytest.mark.parametrize("counts", ["four", [4], 4, True])
+def test_validate_result_reports_counts_that_is_not_a_table(counts):
+    doc = {key: None for key in schema.RESULT_KEYS}
+    doc.update(job_id="20261113-100000-aaaaaa", status="succeeded", counts=counts, warnings=[], items=[])
+    assert schema.validate_result(doc) == ["counts"]
+
+
+def test_validate_result_does_not_trip_on_counts_without_a_total():
+    doc = {key: None for key in schema.RESULT_KEYS}
+    doc.update(job_id="20261113-100000-aaaaaa", status="succeeded", counts={}, warnings=[], items=[])
+    assert schema.validate_result(doc) == []
+
+
+def _interrupt_the_final_write(monkeypatch, times):
+    """The first `times` writes of `finish` are cut by a Ctrl+C after the memory copy was set (a Ctrl+C in the write)."""
+    from agent_crawl_studio import manifest
+    real = manifest.ManifestWriter.finish
+    seen = []
+
+    def finish(self, status, finished_at, error=None, warnings=(), write=True):
+        if write and len(seen) < times:
+            seen.append(1)
+            real(self, status, finished_at, error, warnings, write=False)
+            raise KeyboardInterrupt
+        return real(self, status, finished_at, error, warnings, write=write)
+
+    monkeypatch.setattr(manifest.ManifestWriter, "finish", finish)
+
+
+def test_a_third_ctrl_c_in_the_final_write_answers_cancelled_and_says_the_manifest_is_not_updated(world, server, monkeypatch, tmp_path):
+    _interrupt_the_final_write(monkeypatch, 3)
+    request = tmp_path / "request.json"
+    request.write_bytes(json.dumps({"schema_version": 1, "urls": [server.url("/ok")]}).encode("utf-8"))
+    out = io.StringIO()
+    rc = cli.main(["run", "--request", str(request)], out=out, env=world["env"],
+                  run_fn=lambda req, env: runner.run(req, env, dict(FAKES, policy=policy_for(server), sleep=lambda s: None)))
+    assert out.getvalue().count("\n") == 1
+    result = json.loads(out.getvalue())
+    assert rc == 130 and result["status"] == "cancelled" and "manifest_not_updated" in result["warnings"]
+    assert result["items"][0]["status"] == "succeeded" and manifest_of(world, result)["status"] is None  # the file is behind
+
+
+def test_two_ctrl_c_in_the_final_write_still_end_with_the_file_written(world, server, monkeypatch):
+    _interrupt_the_final_write(monkeypatch, 2)
+    result, code = go(world, server, [server.url("/ok")])
+    assert code == 130 and result["status"] == "cancelled" and "manifest_not_updated" not in result["warnings"]
+    assert manifest_of(world, result) == result
+
+
+# --- no junction is left behind by a test (RQ-013: three were) -----------------------------------------------------
+LEFT_BEHIND = {}
+
+
+def test_remove_junctions_takes_the_link_and_keeps_what_it_points_at(tmp_path):
+    import _winapi
+    target, plain = tmp_path / "target", tmp_path / "plain"
+    target.mkdir()
+    plain.mkdir()
+    (target / "keep.txt").write_text("mine")
+    link = tmp_path / "link"
+    _winapi.CreateJunction(str(target), str(link))
+    assert os.path.lexists(link)
+    remove_junctions([str(link), str(plain), str(tmp_path / "missing")])
+    assert not os.path.lexists(link) and (target / "keep.txt").read_text() == "mine"
+    assert plain.is_dir()  # a folder that is not a junction is never touched
+
+
+def test_a_test_that_forgets_its_junction_is_cleaned_up_by_the_fixture_part_one(tmp_path):
+    import _winapi
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "keep.txt").write_text("mine")
+    link = tmp_path / "link"
+    _winapi.CreateJunction(str(target), str(link))  # no cleanup here on purpose
+    LEFT_BEHIND.update(link=str(link), target=str(target))
+
+
+def test_a_test_that_forgets_its_junction_is_cleaned_up_by_the_fixture_part_two():
+    if not LEFT_BEHIND:
+        pytest.skip("part one did not run")
+    assert not os.path.lexists(LEFT_BEHIND["link"])  # the autouse fixture took the link away at the end of part one
+    assert os.path.exists(os.path.join(LEFT_BEHIND["target"], "keep.txt"))  # and only the link
