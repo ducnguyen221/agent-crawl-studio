@@ -66,7 +66,7 @@ REJECTED_EXIT = 2  # request refused before anything ran
 # Closed list of `reason` values for NETWORK_ERROR / CONTENT_MISMATCH. Never a piece of exception text.
 REASONS = (
     "tls_verify_failed", "connection_refused", "connection_reset", "dns_failed", "network_unreachable",
-    "http_status", "truncated_body", "content_encoding_unsupported", "forbidden", "other",
+    "http_status", "truncated_body", "content_encoding_unsupported", "forbidden", "not_html", "no_text", "other",
 )
 
 HINT_CODES = ("unknown_key", "wrong_type", "out_of_range", "nothing_to_retry")

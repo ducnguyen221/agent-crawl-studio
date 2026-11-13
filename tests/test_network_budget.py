@@ -290,8 +290,10 @@ def test_the_manifest_writer_adds_network_bytes_only_when_it_is_given(tmp_path):
 
 def test_the_result_of_auto_and_direct_equals_the_golden_sample_but_for_network_bytes(tmp_path):
     """FR21.5, SC29 (`tests/fixtures/golden/README.md`): after the normalisation of the sample, the only difference
-    of an `auto` / `direct` result is `network_bytes` (the two new `limits_effective` keys come with TK7)."""
+    of an `auto` / `direct` result is `network_bytes` and the two new `limits_effective` keys (`test_golden_modes.normalize`
+    drops exactly those three)."""
     from fixtures.golden import gen_golden
+    from test_golden_modes import normalize
     from fixtures.httpd import LocalServer
     import socket
     work = str(tmp_path / "work")
@@ -304,8 +306,8 @@ def test_the_result_of_auto_and_direct_equals_the_golden_sample_but_for_network_
             request = gen_golden.build(mode, srv)
             result, code = runner.run(request, env, {"policy": policy})
             assert code == 0
-            clean = gen_golden.normalise(result, srv.port, work, result["job_id"])
-            assert clean.pop("network_bytes") == 5000
+            assert result["network_bytes"] == 5000
+            clean = normalize(result, srv.port, work, result["job_id"])
             golden_path = os.path.join(os.path.dirname(__file__), "fixtures", "golden", "result-%s.json" % mode)
             with open(golden_path, encoding="utf-8") as handle:
                 assert clean == json.load(handle), mode

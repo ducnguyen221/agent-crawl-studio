@@ -51,6 +51,7 @@ def test_no_source_file_names_a_policy_switch():
 def test_request_keys_are_the_documented_set_and_carry_no_policy_switch():
     assert set(schema.REQUEST_KEYS) == {"schema_version", "urls", "mode", "output_dir", "limits", "naming_policy", "existing_file_policy"}
     assert set(schema.URL_ITEM_KEYS) == {"url", "expect"}
+    assert schema.MODES == ("auto", "direct", "media", "gallery", "crawl", "extract")  # FR18.1: `extract` is the sixth
     assert schema.NAMING_POLICIES == ("id_hash",) and schema.EXISTING_FILE_POLICIES == ("rename",)
 
 

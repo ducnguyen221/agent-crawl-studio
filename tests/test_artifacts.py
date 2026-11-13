@@ -493,3 +493,30 @@ def test_adopt_a_file_whose_size_changed_in_the_rename_is_removed(art, job):
     with pytest.raises(art.ArtifactError) as err:
         adopt(art.ArtifactWriter(str(job), rename=short_rename), media_src(job))
     assert err.value.reason == "size" and os.listdir(job / "files") == []
+
+
+def test_adopt_takes_a_real_md_file_with_the_fixed_first_and_last_line(art, job):
+    """SC27 (`adopt` part, TK8): the file the extract mode writes is plain text to `sniff`, and `adopt` records it as
+    text/markdown with the `.md` extension and the role and marks it is given; the same body behind an HTML comment
+    is refused."""
+    from agent_crawl_studio import extract
+    sha = "cd" * 32
+
+    def write(first, name):
+        folder = job / ".tmp" / "0001" / "x"
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / name
+        body = "# Tiêu đề\n\nNội dung tiếng Việt và 日本語の本文。\n"
+        path.write_bytes((first + "\n\n" + body + "\n" + extract.footer_line(sha) + "\n").encode("utf-8"))
+        return str(path)
+
+    writer = art.ArtifactWriter(str(job))
+    good = adopt(writer, write(extract.header_line("https://example.com/p", sha), "ok.md"), allowed_mimes={"text/markdown"},
+                 engine="trafilatura", engine_version="2.3.1", role="extract", mime="text/markdown",
+                 extra={"untrusted": True, "chars": 30, "truncated": False})
+    assert (good["mime"], good["role"], good["untrusted"]) == ("text/markdown", "extract", True)
+    assert good["path"].endswith(".md") and good["chars"] == 30 and good["truncated"] is False
+    with pytest.raises(art.ArtifactError) as info:
+        adopt(writer, write("<!-- crawl-studio extract v1 -->", "bad.md"), item="0002", allowed_mimes={"text/markdown"},
+              role="extract", mime="text/markdown")
+    assert info.value.reason == "mime"

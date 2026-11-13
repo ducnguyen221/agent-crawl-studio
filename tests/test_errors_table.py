@@ -166,7 +166,7 @@ def test_unknown_code_falls_back_to_INTERNAL_ERROR():
 def test_reason_table_is_closed():
     assert tuple(errors.REASONS) == (
         "tls_verify_failed", "connection_refused", "connection_reset", "dns_failed", "network_unreachable",
-        "http_status", "truncated_body", "content_encoding_unsupported", "forbidden", "other")
+        "http_status", "truncated_body", "content_encoding_unsupported", "forbidden", "not_html", "no_text", "other")
 
 
 def test_reason_outside_the_table_becomes_other_and_text_is_never_copied():

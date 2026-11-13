@@ -22,6 +22,8 @@ DEFAULTS = {
     "retries": 3,
     "max_redirects": 5,
     "max_html_bytes": 10 * MiB,
+    "extract_timeout": 30,  # the text extraction of one page (FR19.3)
+    "max_extract_chars": 200_000,  # characters kept of the extracted text (FR20.4)
 }
 HARD_CAPS = {
     "max_items": 1000,
@@ -38,8 +40,11 @@ HARD_CAPS = {
     "retries": 5,
     "max_redirects": 10,
     "max_html_bytes": 50 * MiB,
+    "extract_timeout": 300,
+    "max_extract_chars": 2_000_000,
 }
-TIMEOUT_KEYS = ("connect_timeout", "idle_timeout", "item_timeout", "media_item_timeout", "job_timeout")  # seconds, may be fractional
+TIMEOUT_KEYS = ("connect_timeout", "idle_timeout", "item_timeout", "media_item_timeout", "job_timeout",
+                "extract_timeout")  # seconds, may be fractional
 ZERO_OK = ("retries",)  # `retries: 0` is valid: every item runs once (FR14.1)
 FREE_SPACE_FLOOR = 5 * GiB
 

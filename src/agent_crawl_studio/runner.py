@@ -17,7 +17,7 @@ import threading
 import time
 from datetime import datetime, timezone
 
-from . import artifacts, capabilities, egress, manifest, netfetch, router
+from . import artifacts, capabilities, egress, extract, manifest, netfetch, router
 from . import config as config_mod
 from . import jobobject, limits, outroot, retrying, schema, sniff, urlpolicy, ytdlp
 from .capabilities import WorkRootError
@@ -44,6 +44,11 @@ def _tools_present(env, deps):
     return ytdlp.find_tools(env, which, version_of) is not None
 
 
+def _engine_present(deps):
+    """True when the extract engine's package is installed (FR18.5): its metadata is read, the package never imported."""
+    return extract.find_engine(deps.get("version_of") or capabilities.default_version_of) is not None
+
+
 def _normalised(url, policy):
     """The NormalizedUrl of `url`, or None when the policy refuses it (its redaction then keeps the old way)."""
     try:
@@ -52,7 +57,7 @@ def _normalised(url, policy):
         return None
 
 
-def _item(index, spec, mode, policy, media_hosts, tools_ok):
+def _item(index, spec, mode, policy, media_hosts, tools_ok, engine_ok):
     norm = _normalised(spec.url, policy)
     base = {
         "id": "%04d" % index,
@@ -71,6 +76,9 @@ def _item(index, spec, mode, policy, media_hosts, tools_ok):
     if adapter == router.ADAPTER_MEDIA and not tools_ok():
         return dict(base, adapter=adapter, decision="blocked",
                     error=item_error("DEPENDENCY_MISSING", hint=HINTS["tools_missing"]))
+    if adapter == router.ADAPTER_EXTRACT and not engine_ok():
+        return dict(base, adapter=adapter, decision="blocked",
+                    error=item_error("DEPENDENCY_MISSING", hint=HINTS["extract_engine_missing"]))
     return dict(base, adapter=adapter, decision="allow")
 
 
@@ -89,7 +97,15 @@ def plan(request, env, deps=None):
             present.append(_tools_present(env, deps))
         return present[0]
 
-    items = [_item(n, spec, request.mode, policy, media_hosts, tools_ok) for n, spec in enumerate(request.urls, 1)]
+    engine = []  # the extract engine is looked for once, and only in the `extract` mode
+
+    def engine_ok():
+        if not engine:
+            engine.append(_engine_present(deps))
+        return engine[0]
+
+    items = [_item(n, spec, request.mode, policy, media_hosts, tools_ok, engine_ok)
+             for n, spec in enumerate(request.urls, 1)]
     warnings = list(request.warnings)
     error = None
     output = None

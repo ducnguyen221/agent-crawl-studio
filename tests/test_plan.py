@@ -124,6 +124,18 @@ def test_plan_media_missing_package(world, no_socket):
     assert run_plan(world, [YOUTUBE], mode="media", deps=deps)["items"][0]["error"]["code"] == "DEPENDENCY_MISSING"
 
 
+def test_plan_extract_mode_and_its_limits(world, no_socket):
+    """FR18.1, FR18.5 (the full set of cases is in test_extract_contract.py)."""
+    deps = {"version_of": lambda name: "9.9.9"}
+    result = run_plan(world, [PDF], mode="extract", deps=deps)
+    assert (result["items"][0]["adapter"], result["items"][0]["decision"]) == ("extract", "allow")
+    assert result["limits_effective"]["extract_timeout"] == 30 and result["limits_effective"]["max_extract_chars"] == 200000
+    gone = {"version_of": lambda name: (_ for _ in ()).throw(LookupError(name))}
+    blocked = run_plan(world, [PDF], mode="extract", deps=gone)["items"][0]
+    assert blocked["decision"] == "blocked" and blocked["error"]["code"] == "DEPENDENCY_MISSING"
+    assert blocked["error"]["hint"] == errors.HINTS["extract_engine_missing"]
+
+
 def test_plan_uses_the_injected_policy_only_through_deps(world):
     policy = urlpolicy.Policy(ports=(5555,), ip_ok=lambda address: True)
     assert run_plan(world, ["http://127.0.0.1:5555/x"], deps={"policy": policy})["items"][0]["decision"] == "allow"
