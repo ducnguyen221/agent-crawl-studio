@@ -52,13 +52,16 @@ _ENCODED_URL = re.compile(r"(?<![a-z0-9+.\-])(?:[a-z][a-z0-9+.\-]*)?%3A%2F%2F\S*
 IO_CAP = 2 * MAX_METADATA  # stdout.bin / stderr.bin are not meant to outgrow this
 
 
-def make_item_dirs(job_dir, item_id, check):
-    """Create `<job>/.tmp/<id>/{dl,home,cache,io}`; `check(path)` (raises when a path is a reparse point or
-    otherwise not acceptable) sees every folder right after it is made."""
+def make_item_dirs(job_dir, item_id, check, attempt=1):
+    """Create `<job>/.tmp/<id>/{dl,home,cache,io}` (`<id>-<n>` for the n-th attempt, n >= 2: a process of an earlier
+    attempt that got away cannot write into the folder of a later one); `check(path)` (raises when a path is a
+    reparse point or otherwise not acceptable) sees every folder right after it is made."""
     if not isinstance(item_id, str) or not ITEM_ID.fullmatch(item_id):
         raise ValueError("item id must be four digits")
+    if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 1:
+        raise ValueError("attempt must be 1 or more")
     tmp = os.path.join(job_dir, ".tmp")
-    root = os.path.join(tmp, item_id)
+    root = os.path.join(tmp, item_id if attempt == 1 else "%s-%d" % (item_id, attempt))
     os.makedirs(tmp, exist_ok=True)
     os.mkdir(root)
     if check is not None:
@@ -381,6 +384,12 @@ def _denied_code(proxy, url):
     return "URL_BLOCKED" if any(name == host for name, _ in denied) else "REDIRECT_BLOCKED"
 
 
+def _own_host_failed(proxy, url):
+    """True when the proxy could not reach the very host of the input URL (not a CDN or a page it named)."""
+    host = (urlsplit(url).hostname or "").lower().rstrip(".")
+    return any(str(name).lower().rstrip(".") == host for name, _ in list(getattr(proxy, "failures", None) or []))
+
+
 def _failed_code(proxy):
     """(code, reason, retryable) of a run the proxy let through but could not connect for, else None. Through a
     proxy the engine never sees a lookup or a connect failure, only "502 Bad Gateway" (SPR-03 review RF1), so the
@@ -403,11 +412,13 @@ def _finish(proc, dirs, limits, warnings, proxy=None, url=""):
         if refused:  # the proxy's word comes before the table (FR13.10)
             return _failed(refused, warnings=warnings)
         unreachable = _failed_code(proxy)
-        if unreachable:  # after the refusals, before the table: the engine's own words say only "502"
+        if unreachable and _own_host_failed(proxy, url):  # the input's own host did not answer: that is the cause
             return _failed(unreachable[0], unreachable[1], unreachable[2], warnings)
         text = _tail(os.path.join(dirs.io, "stderr.bin"), MAX_LOG).decode("utf-8", "replace")
-        code, reason, retryable = classify_failure(text)
-        return _failed(code, reason, retryable, warnings)
+        verdict = classify_failure(text)
+        if unreachable and verdict == FALLBACK:  # the engine's own words say only "502": the record is all there is
+            return _failed(unreachable[0], unreachable[1], unreachable[2], warnings)
+        return _failed(verdict[0], verdict[1], verdict[2], warnings)  # a firm word (403, 429, size...) beats a side host
     untrusted, declared, meta_warnings = parse_metadata(_head(os.path.join(dirs.io, "stdout.bin"), MAX_METADATA + 1))
     try:
         path = pick_output(dirs.dl)

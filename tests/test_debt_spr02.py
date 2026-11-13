@@ -420,9 +420,6 @@ def test_two_ctrl_c_in_the_final_write_still_end_with_the_file_written(world, se
 
 
 # --- no junction is left behind by a test (RQ-013: three were) -----------------------------------------------------
-LEFT_BEHIND = {}
-
-
 def test_remove_junctions_takes_the_link_and_keeps_what_it_points_at(tmp_path):
     import _winapi
     target, plain = tmp_path / "target", tmp_path / "plain"
@@ -437,18 +434,25 @@ def test_remove_junctions_takes_the_link_and_keeps_what_it_points_at(tmp_path):
     assert plain.is_dir()  # a folder that is not a junction is never touched
 
 
-def test_a_test_that_forgets_its_junction_is_cleaned_up_by_the_fixture_part_one(tmp_path):
+def _body_of(fixture):
+    """The generator function behind a fixture, called by hand so that its teardown can be seen inside one test."""
+    if hasattr(fixture, "_get_wrapped_function"):
+        return fixture._get_wrapped_function()
+    return getattr(fixture, "__wrapped__", fixture)
+
+
+def test_a_test_that_forgets_its_junction_is_cleaned_up_by_the_fixture(tmp_path, monkeypatch):
     import _winapi
+    import conftest
     target = tmp_path / "target"
     target.mkdir()
     (target / "keep.txt").write_text("mine")
     link = tmp_path / "link"
+    fixture = _body_of(conftest._no_junction_is_left_behind)(monkeypatch)
+    next(fixture)
     _winapi.CreateJunction(str(target), str(link))  # no cleanup here on purpose
-    LEFT_BEHIND.update(link=str(link), target=str(target))
-
-
-def test_a_test_that_forgets_its_junction_is_cleaned_up_by_the_fixture_part_two():
-    if not LEFT_BEHIND:
-        pytest.skip("part one did not run")
-    assert not os.path.lexists(LEFT_BEHIND["link"])  # the autouse fixture took the link away at the end of part one
-    assert os.path.exists(os.path.join(LEFT_BEHIND["target"], "keep.txt"))  # and only the link
+    assert os.path.lexists(link)
+    with pytest.raises(StopIteration):
+        next(fixture)  # the end of the test: the autouse fixture takes the link away
+    assert not os.path.lexists(link)
+    assert (target / "keep.txt").read_text() == "mine"  # and only the link

@@ -314,10 +314,10 @@ class _Job:
         """One media item: probe the name, run the engine in its own folder, take the one file in, and take the
         folder away on every way out (a Ctrl+C passes through after the cleanup)."""
         item_id = "%04d" % index
-        item_root = os.path.join(self.job_dir, ".tmp", item_id)
+        item_root = os.path.join(self.job_dir, ".tmp", item_id if self.attempt == 1 else "%s-%d" % (item_id, self.attempt))
         proxy = None
         try:
-            dirs = ytdlp.make_item_dirs(self.job_dir, item_id, self.check)
+            dirs = ytdlp.make_item_dirs(self.job_dir, item_id, self.check, self.attempt)
             room = max(self.free_bytes_of(self.job_dir) - FREE_RESERVE, 0)
             limits = dict(self.limits, media_item_timeout=max(min(
                 self.limits["media_item_timeout"], self.deadline - self.clock()), 0))
@@ -703,6 +703,32 @@ def run(request, env, deps=None, *, only=None, retry_of=None):
         return _salvage(request, state, policy, moment_of)
 
 
+def _write_final(mf, job, status, error, extra, manifest_failed, moment_of):
+    """The last write of the manifest: a Ctrl+C in it is taken and the write is tried again (three times, then the
+    memory copy is the result and says the file is not up to date)."""
+    done = False
+    for _ in range(3):
+        try:
+            mf.finish(status, _stamp(moment_of()), error, extra, write=not manifest_failed)
+            done = True
+            break
+        except KeyboardInterrupt:
+            job.cancelled, status = True, "cancelled"
+        except manifest.ManifestError:
+            status, done = "failed", True
+            mf.finish(status, _stamp(moment_of()), error_object("OUTPUT_WRITE_FAILED"), ["manifest_not_updated"], write=False)
+            break
+    if not done:  # interrupted every time: the memory copy is the result, and it says the file is not up to date
+        for _ in range(3):
+            try:
+                mf.finish(status, _stamp(moment_of()), error, extra + ["manifest_not_updated"], write=False)
+                break
+            except KeyboardInterrupt:
+                status = "cancelled"
+        if mf.doc["status"] is None:  # even setting it in memory was interrupted every time
+            mf.doc["status"], mf.doc["finished_at"] = "cancelled", _stamp(moment_of())
+
+
 def _run(request, env, deps, policy, moment_of, state):
     pieces, refusal = _start_job(request, env, deps, policy, state["warnings"], moment_of, state)
     if refusal is not None:
@@ -736,27 +762,7 @@ def _run(request, env, deps, policy, moment_of, state):
     error, extra = None, list(job.warnings)
     if manifest_failed:
         error, extra = error_object("OUTPUT_WRITE_FAILED"), ["manifest_not_updated"] + job.warnings
-    done = False
-    for _ in range(3):  # a Ctrl+C during the final write is taken and the write is tried again
-        try:
-            mf.finish(status, _stamp(moment_of()), error, extra, write=not manifest_failed)
-            done = True
-            break
-        except KeyboardInterrupt:
-            job.cancelled, status = True, "cancelled"
-        except manifest.ManifestError:
-            status, done = "failed", True
-            mf.finish(status, _stamp(moment_of()), error_object("OUTPUT_WRITE_FAILED"), ["manifest_not_updated"], write=False)
-            break
-    if not done:  # interrupted every time: the memory copy is the result, and it says the file is not up to date
-        for _ in range(3):
-            try:
-                mf.finish(status, _stamp(moment_of()), error, extra + ["manifest_not_updated"], write=False)
-                break
-            except KeyboardInterrupt:
-                status = "cancelled"
-        if mf.doc["status"] is None:  # even setting it in memory was interrupted every time
-            mf.doc["status"], mf.doc["finished_at"] = "cancelled", _stamp(moment_of())
+    _write_final(mf, job, status, error, extra, manifest_failed, moment_of)
     for _ in range(2):
         try:
             log.close()
