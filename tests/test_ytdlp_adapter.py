@@ -532,3 +532,57 @@ def test_the_tail_and_head_of_a_log(tmp_path):
     path = tmp_path / "log"
     path.write_bytes(b"0123456789")
     assert ytdlp._tail(str(path), 4) == b"6789" and ytdlp._head(str(path), 4) == b"0123"
+
+
+# ------------------------------------------------------------------------- SPR-03 TK9: clear_item_dir (FR10.5)
+
+def test_clear_item_dir_removes_the_whole_tree(tmp_path):
+    dirs = ytdlp.make_item_dirs(str(tmp_path), "0001", None)
+    (tmp_path / ".tmp" / "0001" / "dl" / "media.mp4").write_bytes(b"x")
+    (tmp_path / ".tmp" / "0001" / "home" / "deep").mkdir()
+    (tmp_path / ".tmp" / "0001" / "home" / "deep" / "f").write_bytes(b"y")
+    ytdlp.clear_item_dir(dirs.root, None)
+    assert not os.path.exists(dirs.root) and (tmp_path / ".tmp").is_dir()
+    ytdlp.clear_item_dir(dirs.root, None)  # already gone: nothing to do
+
+
+def test_clear_item_dir_never_follows_junction(tmp_path):
+    import _winapi
+    secret = tmp_path / "secret"
+    secret.mkdir()
+    (secret / "keep.txt").write_text("mine")
+    root = tmp_path / ".tmp" / "0001"
+    (tmp_path / ".tmp").mkdir()
+    _winapi.CreateJunction(str(secret), str(root))
+    ytdlp.clear_item_dir(str(root), None)
+    assert (secret / "keep.txt").read_text() == "mine"
+
+
+def test_clear_item_dir_never_follows_junction_inside_the_tree(tmp_path):
+    import _winapi
+    secret = tmp_path / "secret"
+    secret.mkdir()
+    (secret / "keep.txt").write_text("mine")
+    dirs = ytdlp.make_item_dirs(str(tmp_path), "0001", None)
+    _winapi.CreateJunction(str(secret), str(tmp_path / ".tmp" / "0001" / "dl" / "sub"))
+    ytdlp.clear_item_dir(dirs.root, None)
+    assert (secret / "keep.txt").read_text() == "mine" and not os.path.exists(dirs.root)
+
+
+def test_clear_item_dir_obeys_a_veto_from_check(tmp_path):
+    from agent_crawl_studio.winpath import PathBlocked
+    dirs = ytdlp.make_item_dirs(str(tmp_path), "0001", None)
+
+    def veto(path):
+        raise PathBlocked("reparse")
+    ytdlp.clear_item_dir(dirs.root, veto)
+    assert os.path.isdir(dirs.dl), "a vetoed folder is not touched"
+
+
+def test_clear_item_dir_survives_a_file_that_cannot_be_removed(tmp_path):
+    dirs = ytdlp.make_item_dirs(str(tmp_path), "0001", None)
+    handle = open(os.path.join(dirs.dl, "media.mp4"), "wb")
+    try:
+        ytdlp.clear_item_dir(dirs.root, None)  # a file in use: no exception
+    finally:
+        handle.close()
