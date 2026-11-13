@@ -291,9 +291,17 @@ def _refuse(request, warnings, job_dir, error, moment_of):
     return _rejected(request, warnings, error, moment_of())
 
 
-def _start_job(request, env, deps, policy, warnings, moment_of, state):
-    """Config, output place, job folder, writers. Returns (job pieces, None) or (None, (result, exit code)): exit
-    2 for a refusal, 130 (status `cancelled`) for a Ctrl+C while the job was being set up."""
+def _place_error(exc):
+    """The job-level error for a failure while the output place was decided or probed."""
+    if isinstance(exc, PathBlocked):
+        return error_object("OUTPUT_PATH_BLOCKED", hint=exc.reason)
+    if isinstance(exc, outroot.WriteBlocked):
+        return error_object("OUTPUT_WRITE_FAILED", hint="missing_gib=%d" % exc.missing_gib)
+    return error_object("OUTPUT_WRITE_FAILED")  # a probe of the place failed (OSError)
+
+
+def _resolve_place(request, env, deps, warnings, moment_of):
+    """Config and output place. Returns ((root, out_params, warnings), None) or (None, (result, exit code))."""
     try:
         cfg = config_mod.load_config(env)
         out_params = {key: deps[key] for key in OUTROOT_PARAMS if key in deps}
@@ -305,14 +313,13 @@ def _start_job(request, env, deps, policy, warnings, moment_of, state):
     except KeyboardInterrupt:  # nothing was made yet
         return None, _rejected(request, warnings, error_object("CANCELLED"), moment_of(), 130, "cancelled")
     except (PathBlocked, outroot.WriteBlocked, OSError) as exc:  # OSError: a probe of the place failed
-        if isinstance(exc, PathBlocked):
-            error = error_object("OUTPUT_PATH_BLOCKED", hint=exc.reason)
-        elif isinstance(exc, outroot.WriteBlocked):
-            error = error_object("OUTPUT_WRITE_FAILED", hint="missing_gib=%d" % exc.missing_gib)
-        else:
-            error = error_object("OUTPUT_WRITE_FAILED")
-        return None, _rejected(request, warnings, error, moment_of())
+        return None, _rejected(request, warnings, _place_error(exc), moment_of())
     warnings = warnings + [warning for warning in root.warnings if warning not in warnings]
+    return (root, out_params, warnings), None
+
+
+def _create_job_dir(request, root, out_params, deps, warnings, moment_of, state):
+    """The job folder under a fresh id. Returns ((job_dir, job_id, started), None) or (None, (result, exit code))."""
     create = deps.get("create_job", outroot.create_job)
     token_of = deps.get("token_of")
     for _ in range(JOB_ID_TRIES):
@@ -323,7 +330,7 @@ def _start_job(request, env, deps, policy, warnings, moment_of, state):
         try:
             job_dir = create(root, job_id, **out_params)
             state["job_dir"] = job_dir
-            break
+            return (job_dir, job_id, started), None
         except outroot.JobExists:
             continue  # never reuse or remove a folder that is already there: draw another id
         except KeyboardInterrupt:  # create_job takes away what it made; if it had just finished, we do
@@ -332,8 +339,13 @@ def _start_job(request, env, deps, policy, warnings, moment_of, state):
             return None, _rejected(request, warnings, error_object("CANCELLED"), moment_of(), 130, "cancelled")
         except (PathBlocked, outroot.WriteBlocked) as exc:
             return None, _rejected(request, warnings, _write_error(exc), moment_of())
-    else:
-        return None, _rejected(request, warnings, error_object("OUTPUT_WRITE_FAILED", hint="job_id_taken"), moment_of())
+    return None, _rejected(request, warnings, error_object("OUTPUT_WRITE_FAILED", hint="job_id_taken"), moment_of())
+
+
+def _open_writers(job_dir, root, out_params, deps, request, warnings, started, job_id, state):
+    """The artifact writer, run log and manifest of a new job. Returns ((job_dir, writer, mf, log), None) or
+    (None, (result, exit code)) after taking the folder away again."""
+    moment_of = deps.get("now") or (lambda: datetime.now(timezone.utc))
     sleep = deps.get("sleep", time.sleep)
     realpath_args = {key: out_params[key] for key in ("attrs_of", "realpath") if key in out_params}
 
@@ -357,6 +369,20 @@ def _start_job(request, env, deps, policy, warnings, moment_of, state):
     return (job_dir, writer, mf, log), None
 
 
+def _start_job(request, env, deps, policy, warnings, moment_of, state):
+    """Config, output place, job folder, writers. Returns (job pieces, None) or (None, (result, exit code)): exit
+    2 for a refusal, 130 (status `cancelled`) for a Ctrl+C while the job was being set up."""
+    place, refusal = _resolve_place(request, env, deps, warnings, moment_of)
+    if refusal is not None:
+        return None, refusal
+    root, out_params, warnings = place
+    made, refusal = _create_job_dir(request, root, out_params, deps, warnings, moment_of, state)
+    if refusal is not None:
+        return None, refusal
+    job_dir, job_id, started = made
+    return _open_writers(job_dir, root, out_params, deps, request, warnings, started, job_id, state)
+
+
 def _record(mf, log, job, entry):
     """Log and add one item to the manifest. A Ctrl+C here cancels the job (it is taken once per step and the
     step is repeated); the item is never lost: `add_item` puts it in memory before it writes."""
@@ -378,10 +404,10 @@ def _listed(doc):
     return {os.path.basename(artifact["path"]) for item in doc["items"] for artifact in item["artifacts"]}
 
 
-def _again(step):
-    """Run `step`; a Ctrl+C inside the safety net is taken and the step is repeated (twice at most, then once more
-    unguarded): every step is idempotent."""
-    for _ in range(2):
+def _retry_interrupt(step, tries=2):
+    """Run `step`; a Ctrl+C inside the safety net is taken and the step is repeated (`tries` times at most, then
+    once more unguarded): every step is idempotent."""
+    for _ in range(tries):
         try:
             return step()
         except KeyboardInterrupt:
@@ -409,16 +435,16 @@ def _salvage(request, state, policy, moment_of):
     cancelled and end the job as `cancelled`, unless it had already ended (then its own answer stands)."""
     writer, mf, job_dir = state.get("writer"), state.get("mf"), state.get("job_dir")
     if writer is not None:
-        _again(writer.sweep)
+        _retry_interrupt(writer.sweep)
     if mf is None or mf.doc is None:
         if job_dir is not None:
             _undo_job(job_dir)
         return _rejected(request, state["warnings"], error_object("CANCELLED"), moment_of(), 130, "cancelled")
     if mf.doc["status"] is None:
-        _again(lambda: _add_missing(request, mf, writer, policy))
-        _again(lambda: writer.reconcile(_listed(mf.doc)))  # a manifest exists, so the writer does too
-        _again(lambda: _finish_cancelled(mf, moment_of))
-    _again(state["log"].close)  # likewise
+        _retry_interrupt(lambda: _add_missing(request, mf, writer, policy))
+        _retry_interrupt(lambda: writer.reconcile(_listed(mf.doc)))  # a manifest exists, so the writer does too
+        _retry_interrupt(lambda: _finish_cancelled(mf, moment_of))
+    _retry_interrupt(state["log"].close)  # likewise
     return mf.doc, JOB_EXIT[mf.doc["status"]]
 
 
