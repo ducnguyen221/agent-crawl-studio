@@ -13,7 +13,7 @@ from agent_crawl_studio import capabilities, cli, errors
 
 FFMPEG = r"C:\tools\ffmpeg\bin\ffmpeg.exe"
 NODE = r"C:\Program Files\nodejs\node.exe"
-VERSIONS = {"yt-dlp": "2026.10.26", "httpx": "0.28.1"}
+VERSIONS = {"yt-dlp": "2026.10.26", "httpx": "0.28.1", "trafilatura": "2.3.1"}
 
 
 def fake_which(table):
@@ -50,6 +50,7 @@ def test_all_ok():
     assert cap["schema_version"] == 1
     assert cap["engines"]["yt-dlp"] == {"version": "2026.10.26", "status": "ok"}
     assert cap["engines"]["httpx"] == {"version": "0.28.1", "status": "ok"}
+    assert cap["engines"]["trafilatura"] == {"version": "2.3.1", "status": "ok"}
     assert cap["ffmpeg"] == {"path": FFMPEG, "version": "9.0.2", "status": "ok"}
     assert cap["node"] == {"path": NODE, "version": "24.12.0", "status": "ok"}
     assert cap["work_root"] == r"C:\w"
@@ -106,6 +107,7 @@ def test_missing_node_and_engine():
     assert cap["node"]["status"] == "missing"
     assert cap["engines"]["yt-dlp"]["status"] == "missing"
     assert cap["engines"]["httpx"]["status"] == "missing"
+    assert cap["engines"]["trafilatura"]["status"] == "missing"
     assert cap["error"]["code"] == "DEPENDENCY_MISSING"
     assert cap["error"]["hint"] == "; ".join([capabilities.HINT_ENGINE, capabilities.HINT_NODE])
     assert capabilities.HINT_ENGINE == "run: opcos-runtime ensure --repo-dir plugins/agent-crawl-studio"
