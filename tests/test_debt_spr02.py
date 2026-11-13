@@ -389,12 +389,12 @@ def _interrupt_the_final_write(monkeypatch, times):
     real = manifest.ManifestWriter.finish
     seen = []
 
-    def finish(self, status, finished_at, error=None, warnings=(), write=True):
+    def finish(self, status, finished_at, error=None, warnings=(), write=True, network_bytes=None):
         if write and len(seen) < times:
             seen.append(1)
-            real(self, status, finished_at, error, warnings, write=False)
+            real(self, status, finished_at, error, warnings, write=False, network_bytes=network_bytes)
             raise KeyboardInterrupt
-        return real(self, status, finished_at, error, warnings, write=write)
+        return real(self, status, finished_at, error, warnings, write=write, network_bytes=network_bytes)
 
     monkeypatch.setattr(manifest.ManifestWriter, "finish", finish)
 
