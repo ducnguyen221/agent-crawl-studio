@@ -190,11 +190,15 @@ class ArtifactWriter:
             return name, target
         raise ArtifactError("names")
 
-    def commit(self, part, *, content_type, source_url_redacted, host_url):
+    def commit(self, part, *, content_type, source_url_redacted, host_url, role=None, mime=None, extra=None):
         """Close the part and put it into files/. Returns the artifact record; raises ArtifactError (the part
-        is removed) or whatever `check` raises (the file is removed)."""
+        is removed) or whatever `check` raises (the file is removed).
+
+        `role` (when given) goes into the record and `extra` adds fields, never replacing one the writer measured.
+        `mime` is for a page the caller has already recognised in a way `sniff.detect` cannot (the source page of the
+        extract mode: UTF-16 or XHTML): it is the record's type and gives the extension."""
         part.close()
-        mime = sniff.detect(part.head)
+        mime = mime or sniff.detect(part.head)
         try:
             name, target = self._place(part, sniff.extension_for(mime))
         except ArtifactError:
@@ -220,6 +224,10 @@ class ArtifactWriter:
             artifact["mime_declared"] = declared
         artifact.update(engine="httpx", engine_version=httpx.__version__, source_url_redacted=source_url_redacted,
                         warnings=warnings)
+        if role is not None:
+            artifact["role"] = role
+        for key, value in (extra or {}).items():
+            artifact.setdefault(key, value)
         return artifact
 
     @staticmethod

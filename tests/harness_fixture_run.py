@@ -27,14 +27,18 @@ LOOP = "127.0.0.1"
 def main(argv):
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--work", required=True)
+    parser.add_argument("--mode", default="auto", choices=("auto", "extract"))
+    parser.add_argument("--page", default="blog.html")  # the page of tests/fixtures/extract that `--mode extract` reads
     args = parser.parse_args(argv)
     env = dict(os.environ, CRAWL_STUDIO_WORK=args.work)
     with LocalServer() as server:
         policy = Policy(
             ports=(server.port,), ip_ok=lambda address: address == LOOP,
             resolver=lambda host, port, proto=0: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (LOOP, port))])
-        request = schema.parse_request(json.dumps({"schema_version": 1, "urls": [
-            server.url("/file?size=2000"), server.url("/report.pdf?size=3000")]}).encode("utf-8"))
+        body = {"schema_version": 1, "urls": [server.url("/file?size=2000"), server.url("/report.pdf?size=3000")]}
+        if args.mode == "extract":
+            body = {"schema_version": 1, "mode": "extract", "urls": [server.url("/page/" + args.page)]}
+        request = schema.parse_request(json.dumps(body).encode("utf-8"))
         result, code = runner.run(request, env, {"policy": policy})
     sys.stdout.write(json.dumps(result, ensure_ascii=True, separators=(",", ":")) + "\n")
     return code

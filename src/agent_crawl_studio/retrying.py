@@ -3,7 +3,9 @@
 What is tried again is only a trouble that can pass by itself: a network or server error marked `retryable`, a
 `RATE_LIMITED` answer of the direct adapter, and a `TIMEOUT` of the connect or the idle wait. A `TIMEOUT` of the item
 or of the job, a `RATE_LIMITED` of the yt-dlp adapter (it stays `retryable: true` for the `retry` command), a 403, a
-blocked URL, a size limit and every other code are final."""
+blocked URL, a size limit and every other code are final. An `extract` item is tried again only for the trouble of its
+download (the same as `direct-http`); what goes wrong in the extraction itself (`TIMEOUT` of kind `extract`,
+`TOOL_FAILED`, `CONTENT_MISMATCH`) is final."""
 
 import email.utils
 import re
@@ -13,6 +15,7 @@ BACKOFF = (2, 4, 8, 16, 32)  # seconds to wait before attempt 2, 3, ... (the las
 RETRY_AFTER_CAP = 120  # a `Retry-After` beyond this many seconds ends the tries
 RETRY_AFTER_STATUSES = (429, 503)
 TRANSIENT_TIMEOUTS = ("connect", "idle")
+DOWNLOAD_ADAPTERS = ("direct-http", "extract")  # the `extract` adapter downloads its page the direct way (FR18.7)
 SECONDS = re.compile(r"[0-9]{1,9}")
 
 
@@ -26,7 +29,7 @@ def should_retry(entry, adapter, timeout_kind):
     if code == "NETWORK_ERROR":
         return error.get("retryable") is True
     if code == "RATE_LIMITED":
-        return adapter == "direct-http"
+        return adapter in DOWNLOAD_ADAPTERS
     if code == "TIMEOUT":
         return timeout_kind in TRANSIENT_TIMEOUTS
     return False

@@ -33,6 +33,16 @@ def test_ok_file_and_status_routes(server):
     assert get(server, "/no-such-route").status_code == 404
 
 
+def test_the_page_and_wide_routes_serve_the_extract_fixtures(server):
+    from fixtures.httpd import EXTRACT_DIR, wide_page
+    page = get(server, "/page/vi-windows1258.html")
+    assert page.content == (EXTRACT_DIR / "vi-windows1258.html").read_bytes() and page.headers["content-type"] == "text/html"
+    assert get(server, "/page/blog.html?ctype=text/plain").headers["content-type"] == "text/plain"
+    assert get(server, "/wide/bom").content.startswith(b"\xff\xfe")
+    assert get(server, "/wide/nobom").content == wide_page("nobom") and b"\x00" in wide_page("nobom")[:8]
+    assert get(server, "/wide/xhtml").content.startswith(b"<?xml")
+
+
 def test_it_records_requests_connections_and_headers(server):
     get(server, "/echo?q=1", headers={"X-Probe": "yes"})
     assert server.requests[-1]["path"] == "/echo?q=1"

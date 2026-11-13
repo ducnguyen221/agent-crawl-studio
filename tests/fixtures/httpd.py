@@ -7,6 +7,7 @@ small; that is how tests measure "read no more than the first chunk").
 
 Not production code: no policy, no secrets. Errors raised by a client that hangs up early are swallowed."""
 
+import pathlib
 import socket
 import ssl
 import struct
@@ -17,6 +18,24 @@ from urllib.parse import parse_qs, urlsplit
 
 CHUNK = 65536
 HTML_HEAD = b"<!DOCTYPE html><html><head><title>x</title></head><body>"
+EXTRACT_DIR = pathlib.Path(__file__).resolve().parent / "extract"
+WIDE_TEXT = ("<article><h1>Winter pruning of apple trees</h1><p>Pruning apple trees in the winter keeps the crown open "
+             "so that light and air reach every branch. Start with the dead and crossing branches, then thin the rest "
+             "with clean pruning shears.</p><p>Cut just above an outward facing bud and never leave a long stub. "
+             "A tree pruned in this way carries better fruit and keeps its shape for many years.</p></article>")
+
+
+def wide_page(kind):
+    """The page of the route `/wide/<kind>`: `bom` UTF-16 with a byte order mark, `nobom` UTF-16 little endian
+    without one, `xhtml` an XHTML page that opens with `<?xml`."""
+    html = "<html><head><title>Pruning</title></head><body>%s</body></html>" % WIDE_TEXT
+    if kind == "bom":
+        return html.encode("utf-16")
+    if kind == "nobom":
+        return html.encode("utf-16-le")
+    return ('<?xml version="1.0" encoding="utf-8"?>\n<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" '
+            '"http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">\n<html xmlns="http://www.w3.org/1999/xhtml">'
+            "<head><title>Pruning</title></head><body>%s</body></html>" % WIDE_TEXT).encode("utf-8")
 
 
 def _int(query, name, default):
@@ -117,6 +136,14 @@ class Handler(BaseHTTPRequestHandler):
             ctype = q.get("ctype", ["text/html"])[0]
             self.head(200, [("Content-Type", ctype)], size, close=True)
             self.stream(size, fill=b" ", first=HTML_HEAD)
+        elif path.startswith("/page/"):  # /page/<file of tests/fixtures/extract>?ctype=: the page as it is on disk
+            data = (EXTRACT_DIR / path.rsplit("/", 1)[1]).read_bytes()
+            self.head(200, [("Content-Type", q.get("ctype", ["text/html"])[0])], len(data), close=True)
+            self.push(data)
+        elif path.startswith("/wide/"):  # /wide/<bom|nobom|xhtml>: a small article as UTF-16 or as XHTML
+            data = wide_page(path.rsplit("/", 1)[1])
+            self.head(200, [("Content-Type", "text/html")], len(data), close=True)
+            self.push(data)
         elif path.endswith(".pdf") or path.endswith(".png"):  # /<x>.pdf?kind=html|real&size=N
             size = _int(q, "size", 2000)
             if q.get("kind", ["real"])[0] == "split":  # HTML in two tiny chunks: "<" and then the rest
