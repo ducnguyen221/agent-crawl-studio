@@ -1,15 +1,18 @@
-"""The yt-dlp adapter, pure parts (SPEC FR8.5, FR9.1-FR9.4, FR11): the per-item folders, tool lookup, the command,
-the closed failure table, untrusted metadata and log redaction. Nothing here starts a process, opens a socket or
-imports `yt_dlp` (the package is only ever run as `python -m yt_dlp` in a child)."""
+"""The yt-dlp adapter (SPEC FR8.5, FR9.1-FR9.6, FR10.1, FR11, FR12): the per-item folders, tool lookup, the command,
+the closed failure table, untrusted metadata, log redaction, and `run_media_item`, which runs one engine child in
+a Job Object, watches its folder and ends the whole tree on every way out. Nothing here opens a socket or imports
+`yt_dlp` (the package is only ever run as `python -m yt_dlp` in a child)."""
 
 import json
 import math
 import os
 import re
+import stat
 import sys
+import time
 from collections import namedtuple
 
-from . import capabilities, flags
+from . import capabilities, envbuild, errors, flags, jobobject
 
 MAX_METADATA = 4 * 2 ** 20
 MAX_LOG = 256 * 2 ** 10
@@ -18,6 +21,11 @@ ITEM_SUBDIRS = ("dl", "home", "cache", "io")
 
 ItemDirs = namedtuple("ItemDirs", "root dl home cache io")
 Tools = namedtuple("Tools", "ffmpeg_dir node version")
+MediaOutcome = namedtuple("MediaOutcome", "status code reason retryable file_path untrusted declared_size warnings")
+
+MEDIA_NAME = re.compile(r"media\.[a-z0-9]{1,5}")  # the whitelist of FR10.1; intermediates have two dots
+REPARSE = 0x400
+POLL = 0.5
 
 # (marker, code, reason, retryable): the order is the priority; a marker is looked for only in the stderr lines
 # that start with `ERROR:` (lower-cased), so a title that contains one cannot decide the code. There is no
@@ -142,3 +150,175 @@ def redact_log(text, secrets=()):
     if len(encoded) > MAX_LOG:
         text = encoded[-MAX_LOG:].decode("utf-8", "ignore")
     return text
+
+
+class OutputError(Exception):
+    """`dl/` does not hold exactly one acceptable media file; `reason` is `none`, `many` or `not_plain`."""
+
+    def __init__(self, reason):
+        super().__init__(reason)
+        self.reason = reason
+
+
+def _regular(path):
+    """True for a plain file with one link and no reparse point (os.lstat: DirEntry.stat leaves st_nlink at 0)."""
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return False
+    return (stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+            and not getattr(info, "st_file_attributes", 0) & REPARSE)
+
+
+def pick_output(dl):
+    """The path of the one whitelisted file in `dl/`, or OutputError. Never follows a reparse point; a matching
+    name that is a directory, a link or a hard link is `not_plain`, never a file to take."""
+    good, bad = [], 0
+    try:
+        with os.scandir(dl) as entries:
+            for entry in entries:
+                if not MEDIA_NAME.fullmatch(entry.name):
+                    continue
+                if _regular(entry.path):
+                    good.append(entry.path)
+                else:
+                    bad += 1
+    except OSError:
+        raise OutputError("none") from None
+    if bad:
+        raise OutputError("not_plain")
+    if not good:
+        raise OutputError("none")
+    if len(good) > 1:
+        raise OutputError("many")
+    return good[0]
+
+
+def scan_sizes(dl):
+    """Sizes of the plain files directly in `dl/` (no reparse point followed; a file that vanishes is skipped).
+    `os.lstat`, not `DirEntry.stat`: the size in a directory listing is stale while the engine still holds the
+    file open for writing, which is exactly when the watch must see it grow."""
+    sizes = []
+    try:
+        with os.scandir(dl) as entries:
+            for entry in entries:
+                try:
+                    info = os.lstat(entry.path)
+                except OSError:
+                    continue
+                if stat.S_ISREG(info.st_mode) and not getattr(info, "st_file_attributes", 0) & REPARSE:
+                    sizes.append(info.st_size)
+    except OSError:
+        return []
+    return sizes
+
+
+def _size_verdict(sizes, cap, budget, room):
+    """FR12.4: the error code that ends the run, or None."""
+    if not sizes:
+        return None
+    largest, total = max(sizes), sum(sizes)
+    if largest > cap or total > 2 * cap or largest > budget:
+        return "SIZE_LIMIT"
+    if total > room:
+        return "OUTPUT_WRITE_FAILED"
+    return None
+
+
+def _failed(code, reason=None, retryable=False, warnings=()):
+    return MediaOutcome(errors.ITEM_STATUS_FOR.get(code, "failed"), code, reason, retryable, None, {}, None,
+                        list(warnings))
+
+
+def _tail(path, size):
+    try:
+        with open(path, "rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            handle.seek(max(0, handle.tell() - size))
+            return handle.read(size)
+    except OSError:
+        return b""
+
+
+def _head(path, size):
+    try:
+        with open(path, "rb") as handle:
+            return handle.read(size)
+    except OSError:
+        return b""
+
+
+def _watch(proc, dirs, limits, budget, room, clock, deps):
+    """The 0.5 s loop (FR12.4): returns the code that ended the run, or None when the engine exited by itself."""
+    scan = deps.get("scan", scan_sizes)
+    sleep = deps.get("sleep", time.sleep)
+    poll = deps.get("poll", POLL)
+    deadline = clock() + limits["media_item_timeout"]
+    while True:
+        exited = proc.poll() is not None
+        verdict = _size_verdict(scan(dirs.dl), limits["max_bytes_per_file"], budget, room)
+        if verdict or exited:
+            return verdict
+        if clock() >= deadline:
+            return "TIMEOUT"
+        sleep(poll)
+
+
+def _finish(proc, dirs, limits, warnings):
+    """After the tree is dead: the outcome of an engine that ended by itself."""
+    if proc.returncode != 0:
+        text = _tail(os.path.join(dirs.io, "stderr.bin"), MAX_LOG).decode("utf-8", "replace")
+        code, reason, retryable = classify_failure(text)
+        return _failed(code, reason, retryable, warnings)
+    untrusted, declared, meta_warnings = parse_metadata(_head(os.path.join(dirs.io, "stdout.bin"), MAX_METADATA + 1))
+    try:
+        path = pick_output(dirs.dl)
+    except OutputError as exc:
+        if exc.reason == "none" and declared is not None and declared > limits["max_bytes_per_file"]:
+            return _failed("SIZE_LIMIT", warnings=warnings + meta_warnings)  # exit 0, no file, declared too large
+        return _failed("TOOL_FAILED", warnings=warnings + meta_warnings)
+    return MediaOutcome("succeeded", None, None, False, path, untrusted, declared, warnings + meta_warnings)
+
+
+def _run_engine(argv, env, dirs, limits, budget, room, clock, deps, streams, holder):
+    kill = deps.get("kill_tree", jobobject.kill_tree)
+    spawn = deps.get("spawn", jobobject.spawn_in_job)
+    try:
+        proc, job = spawn(argv, env, dirs.home, streams[0], streams[1], holder=holder)
+    except jobobject.JobObjectError:
+        return _failed("TOOL_FAILED", "job_object_unavailable")  # the process (if any) was ended by the spawner
+    except OSError:
+        return _failed("TOOL_FAILED")
+    verdict = _watch(proc, dirs, limits, budget, room, clock, deps)
+    clean = kill(job, proc)  # before anything is read or picked: the tree is dead first (FR10.1)
+    warnings = [] if clean else ["process_tree_not_empty"]
+    if verdict:
+        return _failed(verdict, warnings=warnings)  # a deadline or a size stop is never worth a retry
+    return _finish(proc, dirs, limits, warnings)
+
+
+def run_media_item(url, item_id, dirs, limits, tools, *, budget, room, clock, deps):
+    """Run the engine for one item and return a MediaOutcome (FR9.6, FR10.1, FR12). `budget` is what is left of
+    `max_total_bytes`, `room` what the disk lets the folder use; `deps` injects `engine_prefix`, `spawn`,
+    `kill_tree`, `scan`, `sleep`, `poll`, `environ`, `proxy_url`. The engine's stdout and stderr go to files in
+    `dirs.io` (the runner redacts them). On any way out - including Ctrl+C - the tree is ended and empty before
+    this returns or re-raises."""
+    argv = build_command(deps.get("engine_prefix", engine_prefix)(), url, tools, dirs, limits,
+                         deps.get("proxy_url", ""))
+    base = deps["environ"] if "environ" in deps else envbuild.process_env()
+    env = envbuild.build_subprocess_env(base, dirs.home, node_dir=os.path.dirname(tools.node))
+    kill = deps.get("kill_tree", jobobject.kill_tree)
+    holder, streams = [], []
+    try:
+        for name in ("stdout.bin", "stderr.bin"):
+            streams.append(open(os.path.join(dirs.io, name), "wb"))
+        return _run_engine(argv, env, dirs, limits, budget, room, clock, deps, streams, holder)
+    except BaseException:
+        for proc, job in holder:  # an interrupt or a bug: the tree must not outlive this call
+            kill(job, proc)
+        raise
+    finally:
+        for proc, job in holder:
+            job.close()
+        for handle in streams:
+            handle.close()

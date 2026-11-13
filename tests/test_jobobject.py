@@ -275,3 +275,127 @@ def test_kill_tree_real_three_level_tree_dies(pids):
     assert jobobject.kill_tree(job, proc, wait=5.0) is True
     job.close()
     assert procs.wait_dead([proc.pid], 5) == []
+
+
+# ------------------------------------------------------------- the real kernel wrapper's failure branches (TK8)
+
+class DeadK32:
+    """kernel32 stand-in whose every call fails (returns 0/NULL), to reach the `_fail` branches of `_Kernel`."""
+
+    def __getattr__(self, name):
+        return lambda *args: 0
+
+
+@pytest.fixture
+def dead_kernel():
+    kernel = jobobject._Kernel()
+    kernel._k32 = DeadK32()
+    return kernel
+
+
+@pytest.mark.parametrize("call,args", [
+    ("create_job", ()), ("set_kill_on_close", (1,)), ("open_process", (1,)), ("assign", (1, 2)),
+    ("active", (1,)), ("terminate", (1, 1)),
+])
+def test_a_failing_kernel_call_raises_job_object_error(dead_kernel, call, args):
+    with pytest.raises(jobobject.JobObjectError):
+        getattr(dead_kernel, call)(*args)
+
+
+def test_job_objects_need_windows(monkeypatch):
+    monkeypatch.setattr(jobobject.sys, "platform", "linux")
+    with pytest.raises(jobobject.JobObjectError):
+        jobobject._Kernel()
+
+
+def test_the_default_kernel_is_made_once():
+    assert jobobject._default_kernel() is jobobject._default_kernel()
+
+
+def test_a_successful_forced_core_job_is_returned_but_not_kept():
+    kernel = FakeKernel()
+    job = jobobject.ensure_core_job(kernel, force=True)
+    assert job is not None and ("assign", "J", "P") in kernel.calls
+
+
+# ------------------------------------------------------------------------------- error paths of the helpers
+
+class StubbornProc(FakeProc):
+    def kill(self):
+        raise OSError("already gone")
+
+    def wait(self, timeout=None):
+        raise subprocess.TimeoutExpired("x", timeout)
+
+
+def test_ending_a_process_that_cannot_be_killed_is_not_fatal():
+    jobobject._end(StubbornProc())
+
+
+def test_abort_survives_a_refusing_job_and_a_process_that_will_not_exit():
+    job = FakeJob([0], terminate_fails=True)
+    job.close = lambda: None
+    jobobject._abort({"proc": StubbornProc()}, job)
+    jobobject._abort({}, job)  # nothing was made: only the job is closed
+
+
+def test_kill_tree_trusts_the_process_when_the_job_is_closed(fake_clock):
+    class Closed(FakeJob):
+        def active_processes(self):
+            raise jobobject.JobObjectError(0, "closed")
+
+    assert jobobject.kill_tree(Closed([0]), FakeProc(running=False), clock=fake_clock, sleep=fake_clock.sleep) is True
+    assert jobobject.kill_tree(Closed([0]), StubbornLive(), wait=1.0, clock=fake_clock, sleep=fake_clock.sleep) is False
+
+
+class StubbornLive(FakeProc):
+    def poll(self):
+        return None
+
+    def kill(self):
+        pass
+
+    def wait(self, timeout=None):
+        raise subprocess.TimeoutExpired("x", timeout)
+
+
+def test_kill_tree_does_not_wait_forever_for_a_process_to_be_reaped(fake_clock):
+    assert jobobject.kill_tree(FakeJob([0]), StubbornProc2(), clock=fake_clock, sleep=fake_clock.sleep) is True
+
+
+class StubbornProc2(FakeProc):
+    def __init__(self):
+        super().__init__(running=False)
+
+    def wait(self, timeout=None):
+        raise subprocess.TimeoutExpired("x", timeout)
+
+
+def test_repeated_interrupts_while_waiting_for_the_helper_do_not_shorten_the_wait(pids, monkeypatch):
+    class Edgy(threading.Thread):
+        joins = 0
+
+        def join(self, timeout=None):
+            Edgy.joins += 1
+            if Edgy.joins <= 2:
+                raise KeyboardInterrupt  # the first wait and the first retry are both interrupted
+            super().join(timeout)
+
+    made = []
+    real = subprocess.Popen
+
+    class Spy(real):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            made.append(self)
+            pids.append(self.pid)
+
+    monkeypatch.setattr(jobobject.threading, "Thread", Edgy)
+    monkeypatch.setattr(jobobject.subprocess, "Popen", Spy)
+    with pytest.raises(KeyboardInterrupt):
+        spawn()
+    assert made and made[0].wait(timeout=5) is not None
+
+
+def test_a_core_job_that_cannot_even_be_made_is_only_a_missing_net():
+    assert jobobject.ensure_core_job(FakeKernel(fail="create_job"), force=True) is None

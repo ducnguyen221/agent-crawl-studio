@@ -72,8 +72,9 @@ def wait_dead(pids, seconds=5.0):
 
 
 def reap(pids):
-    """Teardown net: end any listed PID still alive; returns the ones it had to end."""
-    stragglers = [pid for pid in pids if alive(pid)]
+    """Teardown net: end any listed PID still alive after a short grace (a terminated process disappears a moment
+    later); returns the ones it had to end."""
+    stragglers = wait_dead(pids, 5.0)
     for pid in stragglers:
         kill_pid(pid)
     return stragglers
