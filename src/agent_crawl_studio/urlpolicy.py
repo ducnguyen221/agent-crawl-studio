@@ -25,7 +25,7 @@ MAX_LABEL_LENGTH = 63
 BLOCK_REASONS = (
     "not_a_string", "too_long", "bad_char", "scheme", "empty_host", "userinfo", "bad_authority", "bad_port",
     "port_not_allowed", "percent_in_host", "bad_ip_literal", "ip_not_public", "idna", "bad_label", "host_too_long",
-    "ambiguous_host", "single_label", "local_name", "parser_mismatch", "parser_error",
+    "ambiguous_host", "single_label", "local_name", "parser_mismatch", "parser_error", "media_host",
 )
 
 LOCAL_SUFFIXES = (".localhost", ".local", ".internal", ".home.arpa", ".localdomain")
