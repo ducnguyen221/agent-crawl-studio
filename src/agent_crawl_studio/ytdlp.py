@@ -298,6 +298,11 @@ def _tail(path, size):
         return b""
 
 
+def read_tail(path):
+    """The last 256 KiB of a file as text (nothing when it cannot be read)."""
+    return _tail(path, MAX_LOG).decode("utf-8", "replace")
+
+
 def _head(path, size):
     try:
         with open(path, "rb") as handle:

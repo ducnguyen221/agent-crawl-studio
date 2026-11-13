@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 
 from . import artifacts, capabilities, manifest, netfetch, router
 from . import config as config_mod
-from . import limits, outroot, schema, urlpolicy, ytdlp
+from . import limits, outroot, schema, sniff, urlpolicy, ytdlp
 from .capabilities import WorkRootError
 from .errors import HINTS, ITEM_STATUS_FOR, JOB_EXIT, REASONS, error_object, item_error
 from .winpath import PathBlocked
@@ -128,6 +128,7 @@ FREE_RESERVE = 2 ** 30  # an item that would leave less than 1 GiB free is not w
 UNTRUSTED_HEADERS = (("content-type", "content_type"), ("content-disposition", "content_disposition"),
                      ("last-modified", "last_modified"), ("retry-after", "retry_after"))
 REASON_CODES = ("NETWORK_ERROR", "CONTENT_MISMATCH")
+MEDIA_DEPS = ("engine_prefix", "spawn", "kill_tree", "scan", "poll", "environ", "proxy_url")
 
 
 def _stamp(moment):
@@ -183,13 +184,15 @@ class RunLog:
                 self._handle.close()
 
 
-def _entry(policy, index, spec, code=None, outcome=None, artifact=None, skipped=False):
-    """The manifest item for an end state: a success (artifact), an error `code`, or `skipped`."""
+def _entry(policy, index, spec, code=None, outcome=None, artifact=None, skipped=False, adapter=None, untrusted=None,
+           reason=None, retryable=None, hint=None):
+    """The manifest item for an end state: a success (artifact), an error `code`, or `skipped`. `adapter`,
+    `untrusted`, `reason`, `retryable` and `hint` describe a media item (a direct item has `outcome` instead)."""
     entry = {"id": "%04d" % index, "url_redacted": urlpolicy.redact(spec.url, _normalised(spec.url, policy)),
-             "url_sha256": urlpolicy.url_sha256(spec.url, policy), "adapter": None,
-             "status": "skipped" if skipped else "succeeded", "artifacts": [], "untrusted": {}}
+             "url_sha256": urlpolicy.url_sha256(spec.url, policy), "adapter": adapter,
+             "status": "skipped" if skipped else "succeeded", "artifacts": [], "untrusted": dict(untrusted or {})}
     if artifact is not None:
-        entry["adapter"] = "direct-http"
+        entry["adapter"] = adapter or "direct-http"
         entry["artifacts"] = [artifact]
     if outcome is not None:
         entry["adapter"] = "direct-http"
@@ -202,20 +205,29 @@ def _entry(policy, index, spec, code=None, outcome=None, artifact=None, skipped=
             entry["redirects"] = outcome.redirects
     if code is not None:
         entry["status"] = ITEM_STATUS_FOR[code]
-        reason = outcome.reason if outcome is not None and code in REASON_CODES and outcome.reason in REASONS else None
+        if outcome is not None:
+            reason = outcome.reason if code in REASON_CODES and outcome.reason in REASONS else None
+            retryable = outcome.retryable if code == "NETWORK_ERROR" else None
+        elif code not in REASON_CODES:
+            reason = None
         entry["error"] = item_error(
             code, reason=reason, http_status=outcome.http_status if outcome is not None and code in (
-                "AUTH_REQUIRED", "RATE_LIMITED", "NETWORK_ERROR") else None,
-            retryable=outcome.retryable if outcome is not None and code == "NETWORK_ERROR" else None)
+                "AUTH_REQUIRED", "RATE_LIMITED", "NETWORK_ERROR") else None, retryable=retryable, hint=hint)
     return entry
 
 
 class _Job:
     """The state of one run: which item is next, what has been used, and why the rest must stop."""
 
-    def __init__(self, request, deps, policy, writer, job_dir, media_hosts=()):
+    def __init__(self, request, deps, policy, writer, job_dir, media_hosts=(), env=None, check=None):
         self.request, self.policy, self.writer, self.job_dir = request, policy, writer, job_dir
-        self.media_hosts = media_hosts
+        self.media_hosts, self.env, self.check = media_hosts, env or {}, check
+        self.which = deps.get("which") or shutil.which
+        self.version_of = deps.get("version_of") or capabilities.default_version_of
+        self.dns_probe = deps.get("dns_probe") or urlpolicy.dns_probe
+        self.media_deps = {key: deps[key] for key in MEDIA_DEPS if key in deps}
+        self.tools = []  # looked up once, when the first media item needs it
+        self.warnings = []  # job-level warnings raised by items (`process_tree_not_empty`)
         self.limits = request.limits_effective
         self.clock = deps.get("clock", time.monotonic)
         self.fetch = deps.get("fetch") or netfetch.fetch_item
@@ -225,8 +237,8 @@ class _Job:
         self.cancelled = self.timed_out = False
         self.stop_code = None  # a code that fails every item that follows
 
-    def entry(self, index, spec, code=None, outcome=None, artifact=None, skipped=False):
-        return _entry(self.policy, index, spec, code, outcome, artifact, skipped)
+    def entry(self, index, spec, code=None, outcome=None, artifact=None, skipped=False, **media):
+        return _entry(self.policy, index, spec, code, outcome, artifact, skipped, **media)
 
     def next_item(self, index, spec):
         if self.cancelled:
@@ -239,12 +251,90 @@ class _Job:
             self.timed_out = True
             return self.entry(index, spec, "TIMEOUT")
         try:
-            adapter = router.route(urlpolicy.check_url(spec.url, self.policy), self.request.mode, self.media_hosts)
+            norm = urlpolicy.check_url(spec.url, self.policy)
+            adapter = router.route(norm, self.request.mode, self.media_hosts)
         except urlpolicy.Blocked:
             return self.entry(index, spec, "URL_BLOCKED")
-        if adapter == router.ADAPTER_MEDIA:  # the yt-dlp adapter is wired into `run` in TK14
-            return self.entry(index, spec, "UNSUPPORTED_SOURCE")
+        if adapter == router.ADAPTER_MEDIA:
+            return self.media(index, spec, norm)
         return self.download(index, spec)
+
+    def media(self, index, spec, norm):
+        if not self.tools:
+            self.tools.append(ytdlp.find_tools(self.env, self.which, self.version_of))
+        if self.tools[0] is None:
+            return self.entry(index, spec, "DEPENDENCY_MISSING", adapter=router.ADAPTER_MEDIA,
+                              hint=HINTS["tools_missing"])
+        return self.media_and_place(index, spec, norm, self.tools[0])
+
+    def media_and_place(self, index, spec, norm, tools):
+        """One media item: probe the name, run the engine in its own folder, take the one file in, and take the
+        folder away on every way out (a Ctrl+C passes through after the cleanup)."""
+        item_id = "%04d" % index
+        item_root = os.path.join(self.job_dir, ".tmp", item_id)
+        try:
+            verdict = self.dns_probe(norm.host)
+            if verdict == urlpolicy.DNS_BLOCKED:
+                return self.entry(index, spec, "URL_BLOCKED")
+            if verdict != urlpolicy.DNS_OK:
+                return self.entry(index, spec, "NETWORK_ERROR", adapter=router.ADAPTER_MEDIA, reason="dns_failed",
+                                  retryable=True)
+            dirs = ytdlp.make_item_dirs(self.job_dir, item_id, self.check)
+            room = max(self.free_bytes_of(self.job_dir) - FREE_RESERVE, 0)
+            limits = dict(self.limits, media_item_timeout=max(min(
+                self.limits["media_item_timeout"], self.deadline - self.clock()), 0))
+            outcome = ytdlp.run_media_item(norm.url, item_id, dirs, limits, tools,
+                                           budget=max(self.limits["max_total_bytes"] - self.used, 0), room=room,
+                                           clock=self.clock, deps=self.media_deps)
+            self.engine_log(item_id, dirs)
+            return self.media_result(index, spec, norm, tools, outcome)
+        except PathBlocked:
+            self.stop_code = "OUTPUT_PATH_BLOCKED"
+            return self.entry(index, spec, "OUTPUT_PATH_BLOCKED")
+        except OSError:  # the disk (folders, the free-space probe), not the engine
+            return self.entry(index, spec, "OUTPUT_WRITE_FAILED")
+        finally:
+            ytdlp.clear_item_dir(item_root, self.check)
+
+    def engine_log(self, item_id, dirs):
+        """logs/<id>-ytdlp.log: the tail of the engine's stderr, URLs made safe, every line cleaned (FR9.3)."""
+        try:
+            text = ytdlp.redact_log(ytdlp.read_tail(os.path.join(dirs.io, "stderr.bin")))
+            lines = [manifest.untrusted_text(line) for line in text.splitlines()]
+            if any(lines):
+                with open(os.path.join(self.job_dir, "logs", "%s-ytdlp.log" % item_id), "x", encoding="utf-8",
+                          newline="\n") as out:
+                    out.write("\n".join(lines) + "\n")
+        except OSError:
+            pass  # a log that cannot be written never fails the item
+
+    def media_result(self, index, spec, norm, tools, outcome):
+        for warning in outcome.warnings:
+            if warning not in self.warnings and warning != "metadata_unreadable":
+                self.warnings.append(warning)
+        adapter = router.ADAPTER_MEDIA
+        if outcome.status != "succeeded":
+            if outcome.code == "TIMEOUT" and self.clock() >= self.deadline:
+                self.timed_out = True
+            hint = HINTS["job_object_unavailable"] if outcome.reason == "job_object_unavailable" else None
+            return self.entry(index, spec, outcome.code, adapter=adapter, reason=outcome.reason, hint=hint,
+                              retryable=outcome.retryable)
+        redacted = urlpolicy.redact(spec.url, norm)
+        try:
+            artifact = self.writer.adopt(
+                "%04d" % index, outcome.file_path, source_url_redacted=redacted, host_url=redacted,
+                engine="yt-dlp", engine_version=tools.version, max_bytes=self.limits["max_bytes_per_file"],
+                allowed_mimes=sniff.MEDIA_MIMES)
+        except PathBlocked:
+            self.stop_code = "OUTPUT_PATH_BLOCKED"
+            return self.entry(index, spec, "OUTPUT_PATH_BLOCKED", adapter=adapter)
+        except artifacts.ArtifactError as exc:
+            code = {"mime": "CONTENT_MISMATCH", "size": "SIZE_LIMIT"}.get(exc.reason, "OUTPUT_WRITE_FAILED")
+            return self.entry(index, spec, code, adapter=adapter)
+        if "metadata_unreadable" in outcome.warnings:
+            artifact["warnings"] = list(artifact.get("warnings", [])) + ["metadata_unreadable"]
+        self.used += artifact["bytes"]
+        return self.entry(index, spec, None, artifact=artifact, adapter=adapter, untrusted=outcome.untrusted)
 
     def download(self, index, spec):
         part = None
@@ -400,7 +490,7 @@ def _open_writers(job_dir, root, out_params, deps, request, warnings, started, j
         state["writer"] = writer
         log = RunLog(job_dir, check)
         mf = manifest.ManifestWriter(job_dir, replace=deps.get("replace", os.replace), sleep=sleep, check=check)
-        state["log"], state["mf"] = log, mf
+        state["log"], state["mf"], state["check"] = log, mf, check
         mf.start(job_id, _stamp(started), request.limits_effective, len(request.urls), warnings)
     except KeyboardInterrupt:  # Ctrl+C while the job is being set up: take it away again, say `cancelled`
         return None, _refuse(request, warnings, job_dir, None, moment_of)
@@ -509,7 +599,7 @@ def _run(request, env, deps, policy, moment_of, state):
     if refusal is not None:
         return refusal
     job_dir, writer, mf, log = pieces
-    job = _Job(request, deps, policy, writer, job_dir, _media_hosts(env))
+    job = _Job(request, deps, policy, writer, job_dir, _media_hosts(env), env, state.get("check"))
     manifest_failed = False
     for index, spec in enumerate(request.urls, 1):
         if manifest_failed:  # nothing more is run, but the result still lists every item (SPEC FR3.5)
@@ -527,12 +617,13 @@ def _run(request, env, deps, policy, moment_of, state):
         except manifest.ManifestError:
             manifest_failed = True
     if job.cancelled:  # an interrupted item may have left a finished file the manifest does not list
+        writer.sweep()  # again: the handles of the interrupted frames are closed now, so a folder they held can go
         writer.reconcile(_listed(mf.doc))
     status = "failed" if (manifest_failed or job.timed_out) else schema.job_status(
         [item["status"] for item in mf.doc["items"]], cancelled=job.cancelled)
-    error, extra = None, []
+    error, extra = None, list(job.warnings)
     if manifest_failed:
-        error, extra = error_object("OUTPUT_WRITE_FAILED"), ["manifest_not_updated"]
+        error, extra = error_object("OUTPUT_WRITE_FAILED"), ["manifest_not_updated"] + job.warnings
     done = False
     for _ in range(3):  # a Ctrl+C during the final write is taken and the write is tried again
         try:
