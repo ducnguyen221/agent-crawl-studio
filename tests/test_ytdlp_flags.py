@@ -9,14 +9,17 @@ import pytest
 from agent_crawl_studio import flags
 
 FFMPEG_DIR = r"C:\tools\ffmpeg\bin"
-JOB = os.path.join("C:\\", "w", "jobs", "smoke-1")
+ITEM = os.path.join("C:\\", "w", "jobs", "smoke-1", ".tmp", "0001")
+DL = os.path.join(ITEM, "dl")
+FORMAT = "bv*[height<=1080]+ba/b[height<=1080]"
+PRINT = "%(.{title,uploader,duration,extractor_key,filesize,filesize_approx})j"
 NODE = r"C:\Program Files\nodejs\node.exe"
 
 
 def build(**over):
     args = dict(
         ffmpeg_dir=FFMPEG_DIR,
-        job_dir=JOB,
+        item_dir=ITEM,
         max_filesize="50M",
         socket_timeout=20,
         node_path=NODE,
@@ -33,18 +36,31 @@ def test_exact_fixed_set_in_order():
         "--no-exec",
         "--no-batch-file",
         "--no-playlist",
+        "--playlist-items", "1",
         "--use-extractors", "default,-generic",
         "--proxy", "",
         "--js-runtimes", "node:" + NODE,
         "--ffmpeg-location", FFMPEG_DIR,
-        "--paths", "home:" + os.path.join(JOB, "files"),
-        "--paths", "temp:" + os.path.join(JOB, ".tmp"),
-        "--cache-dir", os.path.join(JOB, ".tmp", "cache"),
+        "--paths", "home:" + DL,
+        "--paths", "temp:" + DL,
+        "--cache-dir", os.path.join(ITEM, "cache"),
         "--max-filesize", "50M",
         "--socket-timeout", "20",
-        "-o", "%(id)s.%(ext)s",
+        "-f", FORMAT,
+        "--no-mtime",
+        "--no-progress",
+        "--print", PRINT,
+        "--no-simulate",
+        "-o", "media.%(ext)s",
     ]
     assert build() == expected
+
+
+def test_proxy_url_goes_after_dash_dash_proxy():
+    url = "http://%s:x@127.0.0.1:5123" % ("ab" * 32)
+    got = build(proxy_url=url)
+    assert got[got.index("--proxy") + 1] == url
+    flags.validate_flags(got)
 
 
 @pytest.mark.parametrize(
@@ -72,7 +88,7 @@ def test_paths_use_home_and_temp_types():
 
 def test_no_raw_flag_parameter():
     params = set(inspect.signature(flags.fixed_ytdlp_flags).parameters)
-    assert params == {"ffmpeg_dir", "job_dir", "max_filesize", "socket_timeout", "node_path"}
+    assert params == {"ffmpeg_dir", "item_dir", "max_filesize", "socket_timeout", "node_path", "proxy_url"}
 
 
 def test_validate_flags_accepts_fixed_set():
@@ -102,6 +118,42 @@ def test_rejects_bad_numbers(field, value):
 
 
 def test_rejects_missing_paths():
-    for field in ("ffmpeg_dir", "job_dir", "node_path"):
+    for field in ("ffmpeg_dir", "item_dir", "node_path"):
         with pytest.raises(ValueError):
             build(**{field: ""})
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        ["-f", "best"],
+        ["-f", "bv*"],
+        ["--format", FORMAT],
+        ["--print", "%(url)s"],
+        ["--print", "%(title)s"],
+        ["--proxy=http://evil"],
+        ["--proxy", "http://evil"],
+        ["--proxy", "http://127.0.0.1:8080"],
+        ["--proxy", "http://%s:x@127.0.0.1:99999999" % ("ab" * 32)],
+        ["--proxy", "http://%s:x@10.0.0.1:5123" % ("ab" * 32)],
+        ["--max-downloads", "1"],
+    ],
+)
+def test_validate_flags_rejects_other_values_of_fixed_flags(bad):
+    with pytest.raises(ValueError):
+        flags.validate_flags(build() + bad)
+
+
+def test_validate_flags_rejects_a_value_changed_inside_the_fixed_set():
+    got = build()
+    got[got.index("-f") + 1] = "best"
+    with pytest.raises(ValueError):
+        flags.validate_flags(got)
+    got = build()
+    got[got.index("--print") + 1] = "%(url)s"
+    with pytest.raises(ValueError):
+        flags.validate_flags(got)
+    got = build()
+    got[got.index("--proxy") + 1] = "http://evil"
+    with pytest.raises(ValueError):
+        flags.validate_flags(got)

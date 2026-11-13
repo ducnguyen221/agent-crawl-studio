@@ -138,6 +138,9 @@ FIXED = flags.fixed_ytdlp_flags(r"C:\tools\ffmpeg\bin", r"C:\w\jobs\smoke-1", "5
         ["-x"],
         ["-oops"],
         ["--paths=home:C:\\x"],
+        ["--format", "best"],
+        ["--max-downloads", "1"],
+        ["--print=%(url)s"],
     ],
 )
 def test_validate_flags_is_an_allowlist(bad):
