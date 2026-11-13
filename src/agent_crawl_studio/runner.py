@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 
 from . import artifacts, capabilities, egress, manifest, netfetch, router
 from . import config as config_mod
-from . import limits, outroot, schema, sniff, urlpolicy, ytdlp
+from . import limits, outroot, retrying, schema, sniff, urlpolicy, ytdlp
 from .capabilities import WorkRootError
 from .errors import HINTS, ITEM_STATUS_FOR, JOB_EXIT, REASONS, error_object, item_error
 from .winpath import PathBlocked
@@ -242,6 +242,10 @@ class _Job:
         self.warnings = []  # job-level warnings raised by items (`process_tree_not_empty`)
         self.limits = request.limits_effective
         self.clock = deps.get("clock", time.monotonic)
+        self.sleep = deps.get("sleep", time.sleep)  # the wait between two attempts of an item (FR14.2)
+        self.now = deps.get("now") or (lambda: datetime.now(timezone.utc))
+        self.attempt = 1  # the number of the attempt in hand, and which wait ran out if it was a TIMEOUT
+        self.timeout_kind = None
         self.fetch = deps.get("fetch") or netfetch.fetch_item
         self.free_bytes_of = deps.get("free_bytes_of", outroot.default_free_bytes_of)
         self.deadline = self.clock() + self.limits["job_timeout"]
@@ -253,6 +257,31 @@ class _Job:
         return _entry(self.policy, index, spec, code, outcome, artifact, skipped, **media)
 
     def next_item(self, index, spec):
+        return self.run_with_retries(index, spec)
+
+    def run_with_retries(self, index, spec):
+        """One item, tried again while its trouble can pass by itself (FR14, `retrying.should_retry`): at most
+        `retries` more times, after the wait of `retrying.wait_seconds`, never past the job's deadline. Every attempt
+        is a whole item of its own (its own part file, folder, proxy). A Ctrl+C in the wait leaves like any other."""
+        attempt = 0
+        while True:
+            attempt += 1
+            self.attempt, self.timeout_kind = attempt, None
+            entry = self.attempt_item(index, spec)
+            if attempt > 1:
+                entry["attempts"] = attempt
+            if attempt > self.limits["retries"] or self.cancelled or self.stop_code or self.timed_out:
+                return entry
+            if not retrying.should_retry(entry, entry.get("adapter"), self.timeout_kind):
+                return entry
+            retry_after = entry.get("untrusted", {}).get("retry_after") if entry.get("http_status") in (
+                retrying.RETRY_AFTER_STATUSES) else None
+            wait = retrying.wait_seconds(attempt, retry_after, self.now())
+            if wait is None or self.clock() + wait >= self.deadline:
+                return entry
+            self.sleep(wait)
+
+    def attempt_item(self, index, spec):
         if self.cancelled:
             return self.entry(index, spec, "CANCELLED")
         if self.stop_code:
@@ -261,6 +290,7 @@ class _Job:
             return self.entry(index, spec, "UNSUPPORTED_SOURCE")
         if self.timed_out or self.clock() >= self.deadline:
             self.timed_out = True
+            self.timeout_kind = "job"
             return self.entry(index, spec, "TIMEOUT")
         try:
             norm = urlpolicy.check_url(spec.url, self.policy)
@@ -363,8 +393,8 @@ class _Job:
                 logs = os.path.join(self.job_dir, "logs")
                 if self.check is not None:
                     self.check(logs)  # a junction in the place of logs/ would send the log out of the job
-                with open(os.path.join(logs, "%s-ytdlp.log" % item_id), "x", encoding="utf-8",
-                          newline="\n") as out:
+                name = "%s-ytdlp.log" % item_id if self.attempt == 1 else "%s-ytdlp-%d.log" % (item_id, self.attempt)
+                with open(os.path.join(logs, name), "x", encoding="utf-8", newline="\n") as out:
                     out.write("\n".join(lines) + "\n")
         except (OSError, PathBlocked):
             pass  # a log that cannot be written never fails the item
@@ -375,8 +405,10 @@ class _Job:
                 self.warnings.append(warning)
         adapter = router.ADAPTER_MEDIA
         if outcome.status != "succeeded":
-            if outcome.code == "TIMEOUT" and self.clock() >= self.deadline:
-                self.timed_out = True
+            if outcome.code == "TIMEOUT":  # the proxy's connect timeout is `retryable`; the engine's own deadline is not
+                if self.clock() >= self.deadline:
+                    self.timed_out = True
+                self.timeout_kind = "job" if self.timed_out else ("connect" if outcome.retryable else "item")
             hint = HINTS["job_object_unavailable"] if outcome.reason == "job_object_unavailable" else None
             return self.entry(index, spec, outcome.code, adapter=adapter, reason=outcome.reason, hint=hint,
                               retryable=outcome.retryable)
@@ -445,6 +477,7 @@ class _Job:
         if outcome.status != "ok":
             if outcome.code == "TIMEOUT" and self.clock() >= self.deadline:
                 self.timed_out = True
+            self.timeout_kind = getattr(outcome, "timeout_kind", None)
             return self.fail(index, spec, part, outcome.code, outcome)
         try:
             artifact = self.writer.commit(part, content_type=outcome.headers_clean.get("content-type"),

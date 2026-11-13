@@ -111,6 +111,10 @@ def test_retry_after_as_an_http_date():
     assert retrying.wait_seconds(1, "Fri, 99 Zzz 2026 99:99:99 GMT", NOW) is None
 
 
+def test_a_retry_after_date_without_a_zone_is_taken_as_utc():
+    assert retrying.wait_seconds(1, "Fri, 13 Nov 2026 12:00:30 -0000", NOW) == 30
+
+
 def test_the_value_of_retry_after_replaces_the_backoff():
     assert retrying.wait_seconds(3, "7", NOW) == 7
 

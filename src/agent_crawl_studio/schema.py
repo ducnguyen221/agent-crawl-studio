@@ -192,6 +192,9 @@ def validate_result(obj):
                 problems.append("items[%d]" % index)
                 continue
             problems += ["items[%d].%s" % (index, key) for key in RESULT_ITEM_KEYS if key not in item]
+            attempts = item.get("attempts")
+            if "attempts" in item and (isinstance(attempts, bool) or not isinstance(attempts, int) or attempts < 1):
+                problems.append("items[%d].attempts" % index)  # FR14.2: a whole number, 1 or more, when present
         counts = obj.get("counts")
         if (obj.get("status") is not None and obj.get("job_id") is not None and isinstance(counts, dict)
                 and "total" in counts and len(obj["items"]) != counts["total"]):
