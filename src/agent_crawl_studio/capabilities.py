@@ -10,7 +10,7 @@ from . import envbuild
 from .errors import error_object
 
 SCHEMA_VERSION = 1
-ENGINES = ("yt-dlp", "httpx")
+ENGINES = ("yt-dlp", "httpx", "trafilatura")
 _FFMPEG_VERSION = re.compile(r"ffmpeg version (\d+(?:\.\d+)*)")
 _NODE_VERSION = re.compile(r"^v?(\d+(?:\.\d+)*)")
 
