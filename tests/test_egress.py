@@ -265,6 +265,7 @@ def test_long_request_line_is_400(rig):
 
 
 def test_stop_closes_port_and_threads(rig):
+    before = {t for t in threading.enumerate() if t.name.startswith("egress")}
     proxy = rig.make()
     s = _connect(proxy, "cdn.example.com:443")
     assert _head(s)[0] == 200
@@ -272,7 +273,7 @@ def test_stop_closes_port_and_threads(rig):
     started = time.monotonic()
     proxy.stop()
     assert time.monotonic() - started < 2.5
-    assert [t for t in threading.enumerate() if t.name.startswith("egress")] == []
+    assert [t for t in threading.enumerate() if t.name.startswith("egress") and t not in before] == []
     with pytest.raises(OSError):
         socket.create_connection(("127.0.0.1", port), timeout=1)
     s.close()
