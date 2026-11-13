@@ -1,7 +1,8 @@
 """Child process of the extract mode (SPR-04 TK7, FR19.2, FR19.4, FR20.1, FR20.2, FR20.7).
 
 Run as `python -I extract_worker.py <params.json>`, with the Python of the core venv. It reads two files (the params
-file and the HTML the core downloaded) and writes ONE result file; it opens no socket and calls no download function.
+file and the HTML the core downloaded) and writes ONE result file; it makes no connection, no name lookup and calls
+no download function (the engine loads urllib3, which binds a socket to ::1 on import: that is not traffic).
 It does NOT import `agent_crawl_studio`: only the standard library and the engine (trafilatura, with lxml and
 charset_normalizer, which come with it). So the few things it shares with `extract.py` are copied here with a note,
 and `tests/test_extract_worker.py` fails when a copy drifts.
@@ -29,7 +30,7 @@ RESULT_VERSION = 1
 RESULT_KEYS = ("v", "ok", "text", "meta", "charset", "guessed")
 META_KEYS = ("title", "author", "date", "sitename", "lang")
 
-_CT_CHARSET = re.compile(r"charset\s*=\s*[\"']?\s*([^\s\"';,]+)", re.IGNORECASE)
+_CT_CHARSET = re.compile(r"charset\s*=\s*[\"']?([^\s\"';,]+)", re.IGNORECASE)
 _META_TAG = re.compile(rb"<meta\b[^>]*>", re.IGNORECASE)
 _META_CHARSET = re.compile(rb"charset\s*=\s*[\"']?\s*([^\s\"';/>]+)", re.IGNORECASE)
 _META_WINDOW = 1024
@@ -38,7 +39,7 @@ _SNIFF = 2048  # the head `extract.is_html` looks at; the 0-byte pattern of UTF-
 BAD_PARAMS = "extract_worker: bad parameters"
 IO_FAILED = "extract_worker: cannot read the page or write the result"
 
-_TEXT_FACTOR = 2  # the text is cut at 2 x max_chars characters: the core cuts again and reads at most 8 x max_chars
+_TEXT_FACTOR = 2  # the text is cut at 2 x max_chars + 1 characters (the extra one tells the core "it was cut")
 _META_MAX = 1000
 _FILE_BASE = 65536
 _DETECT_SAMPLE = 1 << 20
@@ -52,6 +53,16 @@ _DROP = dict.fromkeys([cp for cp in list(range(0, 32)) + list(range(127, 160)) i
 def _allowed(name):
     name = name.strip().lower()
     return name if name in ALLOWED_CHARSETS else None
+
+
+def _key(name):
+    """A codec name reduced to letters and digits, so that the detector's `cp1250`, `iso8859_2`, `shift_jis` or `utf_8`
+    and the `windows-1250`, `iso-8859-2`, `shift_jis` or `utf-8` of `ALLOWED_CHARSETS` compare equal."""
+    name = re.sub(r"[-_]", "", name.strip().lower())
+    return "windows" + name[2:] if re.fullmatch(r"cp125\d", name) else name
+
+
+_ALLOWED_KEYS = frozenset(_key(name) for name in ALLOWED_CHARSETS)
 
 
 def _declared_all(head, content_type):
@@ -122,6 +133,8 @@ def decode_html(data, content_type, detect):
     except UnicodeDecodeError:
         pass
     guess = detect(data)
+    if guess and _key(guess) not in _ALLOWED_KEYS:
+        guess = None  # the guess is held to the same list as a declaration: never utf-7
     try:
         return data.decode(guess or _FALLBACK_CODEC, "replace"), (guess or _FALLBACK_CODEC), True
     except LookupError:
@@ -129,26 +142,58 @@ def decode_html(data, content_type, detect):
 
 
 # --- hidden parts (FR20.2) --------------------------------------------------------------------------------------
-_DROP_TAGS = frozenset(["script", "style", "noscript", "template", "iframe", "object", "embed", "form", "svg"])
+_DROP_TAGS = frozenset(["script", "style", "noscript", "template", "iframe", "object", "embed", "svg"])
+_CONTROLS = frozenset(["input", "select", "textarea", "button", "option"])  # emptied; a `form` itself is kept
+_EXEMPT = frozenset(["html", "body"])  # the rules by attribute (hidden, aria-hidden, style) do not apply to these
 _HIDDEN_STYLE = re.compile(
     r"display\s*:\s*none|visibility\s*:\s*hidden|font-size\s*:\s*0(?:\.0*)?(?![\d.])"
     r"|opacity\s*:\s*0(?:\.0*)?(?![\d.])")
-_CSS_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
+_CSS_ESCAPE = re.compile(r"\\([0-9a-fA-F]{1,6})[ \t\r\n\f]?|\\(.)", re.DOTALL)
+
+
+def _css_comments_out(value):
+    """`value` without its `/* ... */` comments; a comment that is not closed runs to the end, as in CSS. One forward
+    pass with `find`: linear (a lazy `.*?` pattern is quadratic on many `/*` and no `*/`)."""
+    parts, pos = [], 0
+    while True:
+        start = value.find("/*", pos)
+        if start < 0:
+            parts.append(value[pos:])
+            return "".join(parts)
+        parts.append(value[pos:start])
+        end = value.find("*/", start + 2)
+        if end < 0:
+            return "".join(parts)
+        pos = end + 2
+
+
+def _css_unescape(found):
+    if found.group(2) is not None:
+        return found.group(2)
+    code = int(found.group(1), 16)
+    return chr(code) if 0 < code <= 0x10FFFF and not 0xD800 <= code <= 0xDFFF else "\ufffd"
+
+
+def _style_hidden(value):
+    return bool(_HIDDEN_STYLE.search(_CSS_ESCAPE.sub(_css_unescape, _css_comments_out(value or "")).lower()))
 
 
 def _is_hidden(element):
     tag = element.tag
     if not isinstance(tag, str):
         return True  # a comment or a processing instruction (the tag is a function in lxml and in ElementTree)
-    if tag.lower() in _DROP_TAGS:
+    name = tag.lower()
+    if name in _DROP_TAGS or name in _CONTROLS:
         return True
+    if name in _EXEMPT:
+        return False
     for key, value in element.attrib.items():
         key = key.lower()
         if key == "hidden":
             return True
         if key == "aria-hidden" and (value or "").strip().lower() == "true":
             return True
-        if key == "style" and _HIDDEN_STYLE.search(_CSS_COMMENT.sub("", value or "").lower()):
+        if key == "style" and _style_hidden(value):
             return True
     return False
 
@@ -263,7 +308,7 @@ def main(argv=None, tools=None):
         text = tools.extract(tree) or ""  # a MemoryError or any other error here ends the process: nothing is written
         text = text.translate(_DROP)
     ok = bool(text.strip())
-    doc = {"v": RESULT_VERSION, "ok": ok, "text": text[:_TEXT_FACTOR * max_chars] if ok else "",
+    doc = {"v": RESULT_VERSION, "ok": ok, "text": text[:_TEXT_FACTOR * max_chars + 1] if ok else "",
            "meta": {key: _clean(meta.get(key), _META_MAX) for key in META_KEYS},
            "charset": charset, "guessed": guessed}
     payload = serialize(doc, 8 * max_chars + _FILE_BASE)

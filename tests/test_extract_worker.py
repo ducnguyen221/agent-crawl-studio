@@ -78,16 +78,16 @@ def run_worker(python, tmp_path, data, content_type=None, max_chars=200000, driv
 
 
 DRIVER_NO_SOCKET = """
-import sys, runpy, socket
-import trafilatura, lxml.html
+import sys, runpy
 hits = []
-def boom(*args, **kwargs):
-    hits.append(1)
-    raise OSError("network blocked by the test")
-socket.socket = boom
-socket.create_connection = boom
-socket.getaddrinfo = boom
-socket.gethostbyname = boom
+def audit(event, args):
+    # TK11: the hook is installed BEFORE the engine is imported (urllib3 binds a socket to ::1 on import, which is
+    # not traffic); a connection, a name lookup or a datagram is a hit and is refused
+    if event in ("socket.connect", "socket.getaddrinfo", "socket.gethostbyname", "socket.sendto"):
+        hits.append(event)
+        raise OSError("network blocked by the test")
+sys.addaudithook(audit)
+import trafilatura, lxml.html
 sys.argv = [sys.argv[1], sys.argv[2]]
 code = 0
 try:
@@ -307,7 +307,8 @@ def test_a_meta_that_names_utf16_is_read_as_utf8_like_a_browser_does():
 
 
 @pytest.mark.parametrize("detected,expected", [("cp1258", "cp1258"), (None, "windows-1252"),
-                                               ("no-such-codec", "windows-1252")])
+                                               ("no-such-codec", "windows-1252"), ("utf_7", "windows-1252"),
+                                               ("iso-8859-12", "windows-1252")])  # TK11: utf-7 is never taken
 def test_bad_bytes_with_no_declaration_go_to_the_detector_and_never_raise(detected, expected):
     worker = load_worker()
     raw = b"<p>caf\xe9 \xff\xfe broken \x80\x81</p>"
@@ -356,7 +357,7 @@ def visible_text(markup):
 
 @pytest.mark.parametrize("element", [
     "<script>BAD</script>", "<style>BAD</style>", "<noscript>BAD</noscript>", "<template>BAD</template>",
-    "<iframe>BAD</iframe>", "<object>BAD</object>", "<embed>BAD</embed>", "<form>BAD</form>", "<svg>BAD</svg>",
+    "<iframe>BAD</iframe>", "<object>BAD</object>", "<embed>BAD</embed>", "<svg>BAD</svg>",
     "<SCRIPT>BAD</SCRIPT>",
     "<!--BAD-->",
     '<p hidden="">BAD</p>', "<p HIDDEN='hidden'>BAD</p>", '<p aria-hidden="true">BAD</p>',
@@ -392,7 +393,7 @@ def test_a_hidden_comment_is_removed_and_its_tail_is_kept():
 
 
 def test_a_hidden_root_leaves_nothing():
-    assert visible_text("<body hidden=''><p>BAD</p></body>") == ""
+    assert visible_text("<div hidden=''><p>BAD</p></div>") == ""  # TK11: `html` and `body` are exempt (FR20.2 b)
 
 
 # --- the stand-in pipeline --------------------------------------------------------------------------------------
@@ -462,7 +463,7 @@ def test_metadata_may_be_missing_or_odd(tmp_path):
 def test_the_text_is_cut_at_two_times_max_chars_and_each_meta_field_at_1000(tmp_path):
     tools = StandIn(text="x" * 100, meta={"title": "m" * 5000, "sitename": "s" * 1000})
     _, doc = run_in_process(tmp_path, tools, max_chars=10)
-    assert doc["text"] == "x" * 20 and doc["ok"] is True
+    assert doc["text"] == "x" * 21 and doc["ok"] is True  # TK11: 2 x max_chars + 1
     assert doc["meta"]["title"] == "m" * 1000 and doc["meta"]["sitename"] == "s" * 1000
 
 
@@ -763,7 +764,7 @@ def test_a_wide_character_page_up_to_the_ceiling_stays_inside_the_file_ceiling(p
     assert done.returncode == 0, done.stderr.decode("utf-8", "replace")[-600:]
     raw = (tmp_path / "out.json").read_bytes()
     assert doc["ok"] is True and len(doc["text"]) >= max_chars  # at least the ceiling of characters came through
-    assert len(doc["text"]) <= 2 * max_chars
+    assert len(doc["text"]) <= 2 * max_chars + 1  # TK11: one over the ceiling tells the core "cut"
     assert len(raw) <= 8 * max_chars + 65536
     assert b"\\u" not in raw
     result = extract.read_result(str(tmp_path / "out.json"), max_chars, None)
