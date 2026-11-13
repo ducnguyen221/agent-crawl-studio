@@ -138,7 +138,7 @@ def test_plan_output_for_the_default_place(world):
     assert output["parent"] == os.path.join(world["work"], "jobs")
     assert output["job_dir_template"] == os.path.join(world["work"], "jobs", "<job_id>")
     assert result["limits_effective"] == limits.DEFAULTS
-    assert sorted(result["warnings"]) == ["concurrency_not_applied", "retries_not_applied"]
+    assert result["warnings"] == ["concurrency_not_applied"]
 
 
 def test_plan_with_a_relative_output_dir(world):

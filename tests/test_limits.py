@@ -31,7 +31,7 @@ def test_resolve_none_and_empty_give_defaults():
     for given in (None, {}):
         effective, warnings = limits.resolve(given)
         assert effective == DEFAULTS
-        assert sorted(warnings) == ["concurrency_not_applied", "retries_not_applied"]
+        assert warnings == ["concurrency_not_applied"]  # FR14.2: `retries` now works
 
 
 def test_resolve_overrides_one_key_and_keeps_others():
@@ -52,6 +52,9 @@ def test_value_at_the_cap_is_accepted_and_above_is_rejected(key):
 @pytest.mark.parametrize("key", sorted(CAPS))
 @pytest.mark.parametrize("bad", [0, -1])
 def test_zero_and_negative_are_rejected(key, bad):
+    if key == "retries" and bad == 0:  # FR14.1: no retry at all is a valid choice
+        assert limits.resolve({key: 0})[0]["retries"] == 0
+        return
     with pytest.raises(ContractError) as info:
         limits.resolve({key: bad})
     assert info.value.why == "out_of_range"
@@ -91,9 +94,9 @@ def test_limits_must_be_an_object():
         assert (info.value.path, info.value.why) == ("$.limits", "wrong_type")
 
 
-def test_concurrency_and_retries_warn_even_when_explicit():
+def test_concurrency_warns_even_when_explicit_and_retries_does_not():
     _, warnings = limits.resolve({"concurrency": 1, "retries": 1})
-    assert sorted(warnings) == ["concurrency_not_applied", "retries_not_applied"]
+    assert warnings == ["concurrency_not_applied"]
 
 
 def test_required_free_bytes_formula_of_fr3_7():
