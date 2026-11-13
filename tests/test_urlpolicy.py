@@ -471,3 +471,10 @@ def test_dns_probe_treats_a_malformed_answer_as_blocked():
     assert dns_probe("example.com", resolver=lambda *a, **k: [("x",)]) == urlpolicy.DNS_BLOCKED
     assert dns_probe("example.com", resolver=lambda *a, **k: [(0, 0, 0, "", None)]) == urlpolicy.DNS_BLOCKED
     assert dns_probe("example.com", resolver=lambda *a, **k: [(0, 0, 0, "", ())]) == urlpolicy.DNS_BLOCKED
+
+
+def test_redact_with_a_normalised_url_prints_its_normalised_host():
+    """SPR-03 FR16.2: the host in `url_redacted` is the normalised one when the URL normalised."""
+    raw = "https://WWW.Example.COM./a?t=1"
+    assert redact(raw, check_url(raw)) == "https://www.example.com/a?t=REDACTED"
+    assert redact(raw) == "https://WWW.Example.COM./a?t=REDACTED"  # without `norm` the old way
