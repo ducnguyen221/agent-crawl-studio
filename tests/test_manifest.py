@@ -81,7 +81,8 @@ def test_after_every_item_the_file_is_valid_and_has_one_more_item(mf, job):
 
 def test_finish_sets_status_finish_time_error_and_warnings(mf, job):
     writer = writer_of(mf, job)
-    writer.add_item(item(1))
+    for number in (1, 2, 3):  # a finished job lists every item it was given (the validator counts them: RF345)
+        writer.add_item(item(number))
     writer.finish("partial", "2026-11-13T12:01:00Z", error={"code": "OUTPUT_WRITE_FAILED", "message": "m", "retryable": False},
                   warnings=["manifest_not_updated"])
     doc = on_disk(job)

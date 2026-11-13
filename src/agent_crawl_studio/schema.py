@@ -190,4 +190,8 @@ def validate_result(obj):
                 problems.append("items[%d]" % index)
                 continue
             problems += ["items[%d].%s" % (index, key) for key in RESULT_ITEM_KEYS if key not in item]
+        counts = obj.get("counts")
+        if (obj.get("status") is not None and obj.get("job_id") is not None and isinstance(counts, dict)
+                and "total" in counts and len(obj["items"]) != counts["total"]):
+            problems.append("counts.total")  # a finished job lists every item it was given
     return problems

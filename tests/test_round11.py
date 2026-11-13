@@ -36,7 +36,10 @@ def test_the_tls_key_log_is_switched_off_whatever_the_environment_says(nf, tls_s
     out, sink = fetch(nf, srv.url("/ok"), policy_for(srv))
     assert out.status == "ok" and sink.data == b"hello"
     assert seen and all(ctx.keylog_filename is None for ctx in seen)
-    assert not keylog.exists() or keylog.read_text(encoding="utf-8") == ""  # no session secret was ever written
+    # the standard library creates the file (with a one-line header) when the context is made, which httpx's call
+    # cannot avoid; what matters is that no session secret is ever written to it
+    lines = keylog.read_text(encoding="utf-8").splitlines() if keylog.exists() else []
+    assert all(line.startswith("#") for line in lines)
 
 
 # ----------------------------------------------------------------------------- RF301
@@ -200,7 +203,7 @@ def test_two_interrupts_in_a_row_while_an_item_is_added_do_not_lose_the_item(wor
 
     def add_item(self, item, write=True):
         calls.append(1)
-        if len(calls) in (2, 3):  # item 1: interrupted before it is even appended, twice
+        if len(calls) in (1, 2):  # item 1: interrupted before it is even appended, twice
             interrupt()
         return real(self, item, write=write)
     monkeypatch.setattr(manifest.ManifestWriter, "add_item", add_item)
