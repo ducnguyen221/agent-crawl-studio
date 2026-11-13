@@ -331,14 +331,15 @@ def _strip_userinfo(text):
     return prefix + rest
 
 
-def redact(url):
+def redact(url, norm=None):
     """A URL safe to print: no userinfo, no fragment, no control or bidi characters, and every query
     parameter's value (or the whole parameter when it has no "=") replaced by REDACTED, at most 2048
     characters. A userinfo that cannot be parsed gives scheme://REDACTED/ (or REDACTED). A parameter NAME is
     printed only when it is short and plain (letters, digits, _ . [ ] -, at most 32); otherwise the whole
     parameter is REDACTED. Documented limit: a token inside the PATH, including a path parameter such as
-    ";jsessionid=..." (the part after ";"), cannot be hidden."""
-    text = getattr(url, "url", url)
+    ";jsessionid=..." (the part after ";"), cannot be hidden. When `norm` (the NormalizedUrl of this URL) is given,
+    its normalised form is what is printed, so the host is the normalised one (FR16.2)."""
+    text = getattr(norm if norm is not None else url, "url", url)
     if not isinstance(text, str):
         return ""
     text = _strip_userinfo(_clean(text))

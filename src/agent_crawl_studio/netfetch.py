@@ -126,19 +126,27 @@ class PinnedBackend(httpcore.NetworkBackend):
 
     def _resolve(self, host, port, timeout):
         box = {}
-        if not RESOLVER_SLOTS.acquire(blocking=False):
-            raise NetError("TIMEOUT")
+        worker = None
+        got = False
+        try:  # a Ctrl+C before the thread runs must give the slot back: nothing else would (the sweep of RQ-011)
+            got = RESOLVER_SLOTS.acquire(blocking=False)
+            if not got:
+                raise NetError("TIMEOUT")
 
-        def lookup():
-            try:
-                box["infos"] = self.policy.resolver(host, port, proto=socket.IPPROTO_TCP)
-            except BaseException as exc:  # noqa: BLE001 - whatever a resolver raises is "did not resolve"
-                box["error"] = exc
-            finally:
+            def lookup():
+                try:
+                    box["infos"] = self.policy.resolver(host, port, proto=socket.IPPROTO_TCP)
+                except BaseException as exc:  # noqa: BLE001 - whatever a resolver raises is "did not resolve"
+                    box["error"] = exc
+                finally:
+                    RESOLVER_SLOTS.release()
+
+            worker = threading.Thread(target=lookup, daemon=True)
+            worker.start()
+        except BaseException:
+            if got and (worker is None or worker.ident is None):  # the thread never ran: its `finally` will not release
                 RESOLVER_SLOTS.release()
-
-        worker = threading.Thread(target=lookup, daemon=True)
-        worker.start()
+            raise
         worker.join(timeout)
         if worker.is_alive():
             raise NetError("TIMEOUT")
