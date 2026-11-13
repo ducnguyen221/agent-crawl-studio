@@ -1,0 +1,86 @@
+{
+ "schema_version": 1,
+ "kind": "result",
+ "job_id": "<JOB_ID>",
+ "status": "succeeded",
+ "started_at": "<TIMESTAMP>",
+ "finished_at": "<TIMESTAMP>",
+ "counts": {
+  "total": 2,
+  "succeeded": 2,
+  "failed": 0,
+  "blocked": 0,
+  "cancelled": 0,
+  "skipped": 0
+ },
+ "limits_effective": {
+  "max_items": 100,
+  "max_bytes_per_file": 2147483648,
+  "max_total_bytes": 10737418240,
+  "max_artifacts_per_item": 10,
+  "concurrency": 3,
+  "per_host_concurrency": 2,
+  "connect_timeout": 15,
+  "idle_timeout": 60,
+  "item_timeout": 600,
+  "media_item_timeout": 2700,
+  "job_timeout": 14400,
+  "retries": 3,
+  "max_redirects": 5,
+  "max_html_bytes": 10485760
+ },
+ "items": [
+  {
+   "id": "0001",
+   "url_redacted": "http://pinned.example:<PORT>/html?size=REDACTED",
+   "url_sha256": "<URL_SHA256>",
+   "adapter": "direct-http",
+   "status": "succeeded",
+   "artifacts": [
+    {
+     "path": "files/0001-7726cc2227.html",
+     "bytes": 3000,
+     "sha256": "7726cc22271b094c0e58d20702bfa1908cd39f8ff74b492829f8a1aac4293799",
+     "mime": "text/html",
+     "engine": "httpx",
+     "engine_version": "0.28.1",
+     "source_url_redacted": "http://pinned.example:<PORT>/html?size=REDACTED",
+     "warnings": []
+    }
+   ],
+   "untrusted": {
+    "content_type": "text/html",
+    "final_url_redacted": "http://pinned.example:<PORT>/html?size=REDACTED"
+   },
+   "http_status": 200
+  },
+  {
+   "id": "0002",
+   "url_redacted": "http://pinned.example:<PORT>/file?size=REDACTED",
+   "url_sha256": "<URL_SHA256>",
+   "adapter": "direct-http",
+   "status": "succeeded",
+   "artifacts": [
+    {
+     "path": "files/0002-5c0e0ea421.txt",
+     "bytes": 2000,
+     "sha256": "5c0e0ea421571c300b5df6aec0a118b5c3dc02e0683a546341d5efc689df2f58",
+     "mime": "text/plain",
+     "mime_declared": "application/octet-stream",
+     "engine": "httpx",
+     "engine_version": "0.28.1",
+     "source_url_redacted": "http://pinned.example:<PORT>/file?size=REDACTED",
+     "warnings": []
+    }
+   ],
+   "untrusted": {
+    "content_type": "application/octet-stream",
+    "final_url_redacted": "http://pinned.example:<PORT>/file?size=REDACTED"
+   },
+   "http_status": 200
+  }
+ ],
+ "warnings": [
+  "concurrency_not_applied"
+ ]
+}
