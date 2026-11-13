@@ -229,6 +229,8 @@ class _Job:
         self.egress_of = deps.get("egress") or egress.EgressProxy  # a new proxy for every media item (FR13.1)
         self.egress_lines = 0
         self.egress_lock = threading.Lock()
+        self.egress_out = None  # logs/egress.log: created exclusively once, kept open, closed when the run ends
+        self.egress_dead = False
         self.media_deps = {key: deps[key] for key in MEDIA_DEPS if key in deps}
         self.tools = []  # looked up once, when the first media item needs it
         self.warnings = []  # job-level warnings raised by items (`process_tree_not_empty`)
@@ -284,7 +286,11 @@ class _Job:
                 self.limits["media_item_timeout"], self.deadline - self.clock()), 0))
             proxy = self.egress_of(self.policy, byte_cap=2 * self.limits["max_bytes_per_file"],
                                    connect_timeout=self.limits["connect_timeout"], log=self.egress_line)
-            proxy_url = proxy.start()
+            try:
+                proxy_url = proxy.start()
+            except OSError:  # the port (a firewall, no free port), not the disk
+                return self.entry(index, spec, "TOOL_FAILED", adapter=router.ADAPTER_MEDIA,
+                                  hint=HINTS["proxy_unavailable"])
             deps = dict(self.media_deps, proxy_url=proxy_url)
             token = proxy_url.split("//", 1)[-1].split(":", 1)[0]
             outcome = ytdlp.run_media_item(norm.url, item_id, dirs, limits, tools,
@@ -308,19 +314,39 @@ class _Job:
 
     def egress_line(self, line):
         """logs/egress.log: one line per CONNECT the proxies saw, at most 10 000 lines a job, written under a lock;
+        the file is created exclusively and checked once, then kept open (never reopened by path, like run.log);
         a log that cannot be written never fails an item (FR13.8)."""
         with self.egress_lock:
-            if self.egress_lines >= EGRESS_LOG_LINES:
+            if self.egress_dead or self.egress_lines >= EGRESS_LOG_LINES:
                 return
             try:
-                logs = os.path.join(self.job_dir, "logs")
-                if self.check is not None:
-                    self.check(logs)
-                with open(os.path.join(logs, "egress.log"), "a", encoding="utf-8", newline="\n") as out:
-                    out.write(manifest.untrusted_text(line) + "\n")
+                if self.egress_out is None:
+                    logs = os.path.join(self.job_dir, "logs")
+                    path = os.path.join(logs, "egress.log")
+                    if self.check is not None:
+                        self.check(logs)
+                    self.egress_out = open(path, "x", encoding="utf-8", newline="\n")
+                    if self.check is not None:
+                        self.check(path)
+                self.egress_out.write(manifest.untrusted_text(line) + "\n")
+                self.egress_out.flush()
                 self.egress_lines += 1
-            except (OSError, PathBlocked):
-                pass
+            except PathBlocked:  # the file we just made sits somewhere it must not: take it away, stop logging
+                self.egress_dead = True
+                made = self.egress_out is not None
+                self.close_egress_log()
+                if made:
+                    with contextlib.suppress(OSError):
+                        os.remove(os.path.join(self.job_dir, "logs", "egress.log"))
+            except OSError:
+                self.egress_dead = True
+                self.close_egress_log()
+
+    def close_egress_log(self):
+        out, self.egress_out = self.egress_out, None
+        if out is not None:
+            with contextlib.suppress(OSError):
+                out.close()
 
     def engine_log(self, item_id, dirs, token=""):
         """logs/<id>-ytdlp.log: the tail of the engine's stderr, URLs made safe, every line cleaned (FR9.3)."""
@@ -622,6 +648,9 @@ def run(request, env, deps=None):
         return _run(request, env, deps, policy, moment_of, state)
     except KeyboardInterrupt:
         return _salvage(request, state, policy, moment_of)
+    finally:  # every way out, a Ctrl+C included
+        if state.get("job") is not None:
+            state["job"].close_egress_log()
 
 
 def _run(request, env, deps, policy, moment_of, state):
@@ -630,6 +659,7 @@ def _run(request, env, deps, policy, moment_of, state):
         return refusal
     job_dir, writer, mf, log = pieces
     job = _Job(request, deps, policy, writer, job_dir, _media_hosts(env), env, state.get("check"))
+    state["job"] = job
     manifest_failed = False
     for index, spec in enumerate(request.urls, 1):
         if manifest_failed:  # nothing more is run, but the result still lists every item (SPEC FR3.5)

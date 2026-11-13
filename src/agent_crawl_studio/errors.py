@@ -75,6 +75,7 @@ HINT_CODES = ("unknown_key", "wrong_type", "out_of_range")
 HINTS = {
     "tools_missing": "install ffmpeg, node and the core venv; nothing was installed",
     "job_object_unavailable": "the process could not be contained; it was stopped",
+    "proxy_unavailable": "the local egress proxy could not start; nothing was downloaded",
 }
 
 

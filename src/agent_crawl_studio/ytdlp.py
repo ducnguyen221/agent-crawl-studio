@@ -381,12 +381,30 @@ def _denied_code(proxy, url):
     return "URL_BLOCKED" if any(name == host for name, _ in denied) else "REDIRECT_BLOCKED"
 
 
+def _failed_code(proxy):
+    """(code, reason, retryable) of a run the proxy let through but could not connect for, else None. Through a
+    proxy the engine never sees a lookup or a connect failure, only "502 Bad Gateway" (SPR-03 review RF1), so the
+    proxy's own record is the evidence: a name that did not resolve, then a deadline, then a failed connect."""
+    failures = list(getattr(proxy, "failures", None) or [])
+    reasons = [reason for _, reason in failures]
+    if "dns_failed" in reasons:
+        return "NETWORK_ERROR", "dns_failed", True
+    if "timeout" in reasons:
+        return "TIMEOUT", None, True
+    if failures:
+        return "NETWORK_ERROR", "other", True
+    return None
+
+
 def _finish(proc, dirs, limits, warnings, proxy=None, url=""):
     """After the tree is dead: the outcome of an engine that ended by itself."""
     if proc.returncode != 0:
         refused = _denied_code(proxy, url)
         if refused:  # the proxy's word comes before the table (FR13.10)
             return _failed(refused, warnings=warnings)
+        unreachable = _failed_code(proxy)
+        if unreachable:  # after the refusals, before the table: the engine's own words say only "502"
+            return _failed(unreachable[0], unreachable[1], unreachable[2], warnings)
         text = _tail(os.path.join(dirs.io, "stderr.bin"), MAX_LOG).decode("utf-8", "replace")
         code, reason, retryable = classify_failure(text)
         return _failed(code, reason, retryable, warnings)
