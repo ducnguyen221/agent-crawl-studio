@@ -28,6 +28,9 @@ MediaOutcome = namedtuple("MediaOutcome", "status code reason retryable file_pat
 MEDIA_NAME = re.compile(r"media\.[a-z0-9]{1,5}")  # the whitelist of FR10.1; intermediates have two dots
 REPARSE = 0x400
 POLL = 0.5
+# The engine's job (SPEC FR22.3): at most 16 processes at once (the engine, node, ffmpeg and what they start: 4 seen
+# at the most, PLAN TK1 section 5; the floor of 16 decides), and no memory limit.
+MEDIA_JOB_LIMITS = jobobject.JobLimits(memory_bytes=None, active_processes=16)
 
 # (marker, code, reason, retryable): the order is the priority; a marker is looked for only in the stderr lines
 # that start with `ERROR:` (lower-cased), so a title that contains one cannot decide the code. There is no
@@ -227,6 +230,12 @@ class OutputError(Exception):
         self.reason = reason
 
 
+def reparse_dir(path):
+    """True when `path` is a reparse point (a junction or a symbolic link): the core never reads through one
+    (SPEC FR22.4); shared by `dl/` and the output folder of the extraction child. False when it is not there."""
+    return _is_reparse(path)
+
+
 def _regular(path):
     """True for a plain file with one link and no reparse point (os.lstat: DirEntry.stat leaves st_nlink at 0)."""
     try:
@@ -241,6 +250,8 @@ def pick_output(dl):
     """The path of the one whitelisted file in `dl/`, or OutputError. Never follows a reparse point; a matching
     name that is a directory, a link or a hard link is `not_plain`, never a file to take."""
     good, bad = [], 0
+    if reparse_dir(dl):  # `dl/` was swapped for a link while the engine ran: what it points to is not read
+        raise OutputError("not_plain")
     try:
         with os.scandir(dl) as entries:
             for entry in entries:
@@ -266,6 +277,8 @@ def scan_sizes(dl):
     `os.lstat`, not `DirEntry.stat`: the size in a directory listing is stale while the engine still holds the
     file open for writing, which is exactly when the watch must see it grow."""
     sizes = []
+    if reparse_dir(dl):
+        return []
     try:
         with os.scandir(dl) as entries:
             for entry in entries:
@@ -433,7 +446,7 @@ def _run_engine(argv, env, dirs, limits, budget, room, clock, deps, streams, hol
     kill = deps.get("kill_tree", jobobject.kill_tree)
     spawn = deps.get("spawn", jobobject.spawn_in_job)
     try:
-        proc, job = spawn(argv, env, dirs.home, streams[0], streams[1], holder=holder)
+        proc, job = spawn(argv, env, dirs.home, streams[0], streams[1], holder=holder, limits=MEDIA_JOB_LIMITS)
     except jobobject.JobObjectError:
         return _failed("TOOL_FAILED", "job_object_unavailable")  # the process (if any) was ended by the spawner
     except OSError:
