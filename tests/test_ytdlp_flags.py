@@ -11,7 +11,7 @@ from agent_crawl_studio import flags
 FFMPEG_DIR = r"C:\tools\ffmpeg\bin"
 ITEM = os.path.join("C:\\", "w", "jobs", "smoke-1", ".tmp", "0001")
 DL = os.path.join(ITEM, "dl")
-FORMAT = "bv*[height<=1080]+ba/b[height<=1080]"
+FORMAT = "bv*[height<=1080][protocol=https]+ba[protocol=https]/b[height<=1080][protocol=https]"
 PRINT = "%(.{title,uploader,duration,extractor_key,filesize,filesize_approx})j"
 NODE = r"C:\Program Files\nodejs\node.exe"
 

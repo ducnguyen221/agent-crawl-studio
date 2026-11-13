@@ -63,12 +63,25 @@ def test_a_missing_tool_is_blocked_env(tmp_path):
 
 
 def test_a_name_that_does_not_resolve_is_blocked_env(tmp_path):
-    rc, obj = go(tmp_path, deps=deps_for(dns=urlpolicy.DNS_FAIL))
+    rc, obj = go(tmp_path, deps=deps_for("fail_dns"))
     assert rc == 1 and obj["status"] == "BLOCKED_ENV"
 
 
+class Refusing:
+    """A stand-in egress proxy that refused the input host (FR13.10)."""
+    over_cap = type("E", (), {"is_set": staticmethod(lambda: False)})()
+    denied = [("www.youtube.com", "ip_not_public")]
+    url = "http://%s:x@127.0.0.1:5" % ("ab" * 32)
+
+    def start(self):
+        return self.url
+
+    def stop(self, timeout=2.0):
+        pass
+
+
 def test_a_non_public_address_is_a_fail_url_blocked(tmp_path):
-    rc, obj = go(tmp_path, deps=deps_for(dns=urlpolicy.DNS_BLOCKED))
+    rc, obj = go(tmp_path, deps=deps_for("fail_403", egress=lambda *a, **k: Refusing()))
     assert rc == 1 and obj["status"] == "FAIL" and obj["error"]["code"] == "URL_BLOCKED"
 
 
@@ -92,10 +105,10 @@ def test_plan_only_is_not_run_and_runs_nothing(tmp_path):
 
 
 def test_a_ctrl_c_exits_130_with_a_fixed_error(tmp_path):
-    def stop(host):
+    def stop(*args, **kwargs):
         raise KeyboardInterrupt
 
-    rc, obj = go(tmp_path, deps=deps_for(dns_probe=stop))
+    rc, obj = go(tmp_path, deps=deps_for(egress=stop))
     assert rc == 130 and obj["error"]["code"] == "INTERRUPTED"
 
 

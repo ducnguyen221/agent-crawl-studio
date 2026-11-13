@@ -65,18 +65,6 @@ def test_a_host_outside_the_allowlist_in_media_mode_is_blocked_and_nothing_start
     assert result["items"][0]["error"]["code"] == "URL_BLOCKED" and spawned == []
 
 
-def test_a_dns_answer_that_is_not_public_is_blocked_and_nothing_starts(world, server):
-    spawned = []
-    result, code = run_media(world, server, [YT], dns=urlpolicy.DNS_BLOCKED, spawned=spawned)
-    assert result["items"][0]["error"]["code"] == "URL_BLOCKED" and spawned == [] and tmp_dirs(world, result) == []
-
-
-def test_a_name_that_does_not_resolve_is_a_retryable_network_error(world, server):
-    result, code = run_media(world, server, [YT], dns=urlpolicy.DNS_FAIL)
-    error = result["items"][0]["error"]
-    assert error["code"] == "NETWORK_ERROR" and error["reason"] == "dns_failed" and error["retryable"] is True
-
-
 def test_a_missing_tool_fails_the_item_with_a_fixed_hint(world, server):
     spawned = []
     result, code = run_media(world, server, [YT], spawned=spawned, which=lambda cmd, path=None: None)
