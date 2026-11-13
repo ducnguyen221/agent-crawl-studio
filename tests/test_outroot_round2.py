@@ -130,6 +130,16 @@ def test_an_os_error_while_creating_a_level_is_write_blocked(world, monkeypatch)
 
 
 # --- RF63: the 240 limit leaves room for job id, \files\ and a file name -----------------------------------------------
+FIXED_WORK = "C:\\crawl-len\\w"  # 14 characters, never created: the length tests must not depend on pytest's folder
+
+
+@pytest.fixture
+def fixed_world(world):
+    """`world` with a work root of a fixed length, so that a path of exactly N characters is one on every machine."""
+    assert len(FIXED_WORK) == 14 and not os.path.exists(FIXED_WORK)
+    return dict(world, work=FIXED_WORK, env=dict(world["env"], CRAWL_STUDIO_WORK=FIXED_WORK))
+
+
 def parent_of_length(world, length):
     base = world["work"] + "\\jobs"
     pad = length - len(base) - 1
@@ -145,22 +155,22 @@ def test_the_reserve_constants():
     assert winpath.JOB_RESERVE == 1 + 22 + len("\\files\\") + 32
 
 
-def test_a_parent_of_239_chars_is_blocked_and_the_real_limit_is_178(world):
+def test_a_parent_of_239_chars_is_blocked_and_the_real_limit_is_178(fixed_world):
     assert 240 - winpath.JOB_RESERVE == 178
     for length in (239, 179):
-        parent = parent_of_length(world, length)
+        parent = parent_of_length(fixed_world, length)
         assert len(parent) == length
-        assert blocked(world, parent) == "too_long"
-    parent = parent_of_length(world, 178)
-    assert len(parent) == 178 and resolve(world, parent).parent == parent
+        assert blocked(fixed_world, parent) == "too_long"
+    parent = parent_of_length(fixed_world, 178)
+    assert len(parent) == 178 and resolve(fixed_world, parent).parent == parent
 
 
-def test_create_job_checks_the_length_of_the_whole_job_path(world):
-    short = resolve(world)
-    long_root = outroot.Root(short.root, parent_of_length(world, 200), [])
+def test_create_job_checks_the_length_of_the_whole_job_path(fixed_world):
+    short = resolve(fixed_world)
+    long_root = outroot.Root(short.root, parent_of_length(fixed_world, 200), [])
     with pytest.raises(PathBlocked) as info:
         outroot.create_job(long_root, JOB, **FAKES)
-    assert info.value.reason == "too_long" and not os.path.exists(world["work"])
+    assert info.value.reason == "too_long" and not os.path.exists(fixed_world["work"])
 
 
 # --- RF62: Startup folders from the known-folder API, not from APPDATA ---------------------------------------------------
