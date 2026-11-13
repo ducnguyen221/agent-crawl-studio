@@ -11,10 +11,11 @@ the batch into a new job folder, one item after another, and ends every path (al
 import contextlib
 import os
 import shutil
+import threading
 import time
 from datetime import datetime, timezone
 
-from . import artifacts, capabilities, manifest, netfetch, router
+from . import artifacts, capabilities, egress, manifest, netfetch, router
 from . import config as config_mod
 from . import limits, outroot, schema, sniff, urlpolicy, ytdlp
 from .capabilities import WorkRootError
@@ -128,6 +129,7 @@ FREE_RESERVE = 2 ** 30  # an item that would leave less than 1 GiB free is not w
 UNTRUSTED_HEADERS = (("content-type", "content_type"), ("content-disposition", "content_disposition"),
                      ("last-modified", "last_modified"), ("retry-after", "retry_after"))
 REASON_CODES = ("NETWORK_ERROR", "CONTENT_MISMATCH")
+EGRESS_LOG_LINES = 10000
 MEDIA_DEPS = ("engine_prefix", "spawn", "kill_tree", "scan", "poll", "environ", "proxy_url")
 
 
@@ -224,7 +226,9 @@ class _Job:
         self.media_hosts, self.env, self.check = media_hosts, env or {}, check
         self.which = deps.get("which") or shutil.which
         self.version_of = deps.get("version_of") or capabilities.default_version_of
-        self.dns_probe = deps.get("dns_probe") or urlpolicy.dns_probe
+        self.egress_of = deps.get("egress") or egress.EgressProxy  # a new proxy for every media item (FR13.1)
+        self.egress_lines = 0
+        self.egress_lock = threading.Lock()
         self.media_deps = {key: deps[key] for key in MEDIA_DEPS if key in deps}
         self.tools = []  # looked up once, when the first media item needs it
         self.warnings = []  # job-level warnings raised by items (`process_tree_not_empty`)
@@ -272,21 +276,21 @@ class _Job:
         folder away on every way out (a Ctrl+C passes through after the cleanup)."""
         item_id = "%04d" % index
         item_root = os.path.join(self.job_dir, ".tmp", item_id)
+        proxy = None
         try:
-            verdict = self.dns_probe(norm.host)
-            if verdict == urlpolicy.DNS_BLOCKED:
-                return self.entry(index, spec, "URL_BLOCKED")
-            if verdict != urlpolicy.DNS_OK:
-                return self.entry(index, spec, "NETWORK_ERROR", adapter=router.ADAPTER_MEDIA, reason="dns_failed",
-                                  retryable=True)
             dirs = ytdlp.make_item_dirs(self.job_dir, item_id, self.check)
             room = max(self.free_bytes_of(self.job_dir) - FREE_RESERVE, 0)
             limits = dict(self.limits, media_item_timeout=max(min(
                 self.limits["media_item_timeout"], self.deadline - self.clock()), 0))
+            proxy = self.egress_of(self.policy, byte_cap=2 * self.limits["max_bytes_per_file"],
+                                   connect_timeout=self.limits["connect_timeout"], log=self.egress_line)
+            proxy_url = proxy.start()
+            deps = dict(self.media_deps, proxy_url=proxy_url)
+            token = proxy_url.split("//", 1)[-1].split(":", 1)[0]
             outcome = ytdlp.run_media_item(norm.url, item_id, dirs, limits, tools,
                                            budget=max(self.limits["max_total_bytes"] - self.used, 0), room=room,
-                                           clock=self.clock, deps=self.media_deps)
-            self.engine_log(item_id, dirs)
+                                           clock=self.clock, deps=deps, proxy=proxy)
+            self.engine_log(item_id, dirs, token)
             return self.media_result(index, spec, norm, tools, outcome)
         except PathBlocked:
             self.stop_code = "OUTPUT_PATH_BLOCKED"
@@ -296,12 +300,32 @@ class _Job:
         except Exception:  # noqa: BLE001 - one item's surprise fails that item only (a Ctrl+C still passes through)
             return self.entry(index, spec, "TOOL_FAILED", adapter=router.ADAPTER_MEDIA)
         finally:
-            ytdlp.clear_item_dir(item_root, self.check)
+            try:
+                if proxy is not None:
+                    proxy.stop()  # after `run_media_item` ended the tree; the port and tunnels close <= 2 s (FR13.8)
+            finally:
+                ytdlp.clear_item_dir(item_root, self.check)
 
-    def engine_log(self, item_id, dirs):
+    def egress_line(self, line):
+        """logs/egress.log: one line per CONNECT the proxies saw, at most 10 000 lines a job, written under a lock;
+        a log that cannot be written never fails an item (FR13.8)."""
+        with self.egress_lock:
+            if self.egress_lines >= EGRESS_LOG_LINES:
+                return
+            try:
+                logs = os.path.join(self.job_dir, "logs")
+                if self.check is not None:
+                    self.check(logs)
+                with open(os.path.join(logs, "egress.log"), "a", encoding="utf-8", newline="\n") as out:
+                    out.write(manifest.untrusted_text(line) + "\n")
+                self.egress_lines += 1
+            except (OSError, PathBlocked):
+                pass
+
+    def engine_log(self, item_id, dirs, token=""):
         """logs/<id>-ytdlp.log: the tail of the engine's stderr, URLs made safe, every line cleaned (FR9.3)."""
         try:
-            text = ytdlp.redact_log(ytdlp.read_tail(os.path.join(dirs.io, "stderr.bin")))
+            text = ytdlp.redact_log(ytdlp.read_tail(os.path.join(dirs.io, "stderr.bin")), secrets=(token,))
             lines = [manifest.untrusted_text(line) for line in text.splitlines()]
             if any(lines):
                 logs = os.path.join(self.job_dir, "logs")

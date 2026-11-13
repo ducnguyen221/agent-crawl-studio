@@ -14,7 +14,8 @@ FORBIDDEN_FLAGS = (
 _SIZE = re.compile(r"^[1-9][0-9]*[KMGkmg]?$")
 
 # One file, at most 1080p, chosen by the tool and never by the agent (FR9.1); the output name is fixed.
-FORMAT = "bv*[height<=1080]+ba/b[height<=1080]"
+# Only https formats: ffmpeg then merges local files and never opens a network URL (FR13.7, TK17 spike).
+FORMAT = "bv*[height<=1080][protocol=https]+ba[protocol=https]/b[height<=1080][protocol=https]"
 # One JSON line on stdout: the four untrusted fields and, for the core's own size rule, the declared size.
 PRINT = "%(.{title,uploader,duration,extractor_key,filesize,filesize_approx})j"
 OUTPUT_TEMPLATE = "media.%(ext)s"
