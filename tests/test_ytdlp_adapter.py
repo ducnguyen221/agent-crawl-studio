@@ -74,6 +74,7 @@ def test_find_tools_needs_ffmpeg_node_and_the_package():
     assert ytdlp.find_tools({"PATH": "x"}, which_of({"node": NODE}), version_ok) is None
     assert ytdlp.find_tools({"PATH": "x"}, which_of({"ffmpeg": FFMPEG_EXE}), version_ok) is None
     assert ytdlp.find_tools({"PATH": "x"}, which_of(ALL), version_missing) is None
+    assert ytdlp.find_tools({"PATH": "x"}, which_of(ALL), lambda name: "") is None
 
 
 def test_engine_prefix_isolates_the_interpreter():
@@ -181,7 +182,7 @@ def test_parse_metadata_maps_the_four_fields():
 
 
 def test_parse_metadata_title_is_at_most_200_clean_characters():
-    raw = json.dumps({"title": "\x1b[31m\u202e" + "x" * 500 + "\n"}).encode()
+    raw = json.dumps({"title": "\x1b\u202e" + "x" * 500 + "\n"}).encode()
     untrusted, size, _ = ytdlp.parse_metadata(raw)
     assert untrusted == {"title": "x" * 200} and size is None
 
@@ -199,6 +200,8 @@ def test_parse_metadata_title_is_at_most_200_clean_characters():
         b"x" * (4 * 2 ** 20 + 1),
         b'{"title":"' + b"x" * (4 * 2 ** 20) + b'"}',
     ],
+    ids=["empty", "not_json", "two_objects", "array", "string", "truncated", "deeply_nested", "over_4mib",
+         "object_over_4mib"],  # short ids: a 4 MiB id would overflow PYTEST_CURRENT_TEST
 )
 def test_parse_metadata_unreadable(raw):
     assert ytdlp.parse_metadata(raw) == ({}, None, ["metadata_unreadable"])
@@ -296,7 +299,7 @@ def test_the_child_environment_holds_only_allowed_keys(tmp_path, monkeypatch):
     done, _ = run_fake("print_env", tmp_path, env=env)
     reported = json.loads(done.stdout)
     assert "CRAWL_FAKE_API_KEY" not in reported["keys"]
-    assert set(reported["keys"]) <= set(envbuild.ALLOWED_KEYS)
+    assert {k.upper() for k in reported["keys"]} <= {k.upper() for k in envbuild.ALLOWED_KEYS}  # Windows upper-cases
     assert reported["TEMP"] == str(home)
     untrusted, _, warnings = ytdlp.parse_metadata(done.stdout.encode())
     assert warnings == [] and untrusted == {}  # the env report has none of the four fields

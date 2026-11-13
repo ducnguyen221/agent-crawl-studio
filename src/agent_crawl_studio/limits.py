@@ -17,6 +17,7 @@ DEFAULTS = {
     "connect_timeout": 15,
     "idle_timeout": 60,
     "item_timeout": 600,
+    "media_item_timeout": 2700,  # yt-dlp items: a long video needs longer than a file
     "job_timeout": 4 * 3600,
     "retries": 3,
     "max_redirects": 5,
@@ -32,12 +33,13 @@ HARD_CAPS = {
     "connect_timeout": 60,
     "idle_timeout": 300,
     "item_timeout": 4 * 3600,
+    "media_item_timeout": 4 * 3600,
     "job_timeout": 24 * 3600,
     "retries": 5,
     "max_redirects": 10,
     "max_html_bytes": 50 * MiB,
 }
-TIMEOUT_KEYS = ("connect_timeout", "idle_timeout", "item_timeout", "job_timeout")  # seconds, may be fractional
+TIMEOUT_KEYS = ("connect_timeout", "idle_timeout", "item_timeout", "media_item_timeout", "job_timeout")  # seconds, may be fractional
 FREE_SPACE_FLOOR = 5 * GiB
 
 
