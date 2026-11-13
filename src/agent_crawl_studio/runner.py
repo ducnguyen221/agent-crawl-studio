@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 
 from . import artifacts, capabilities, manifest, netfetch, router
 from . import config as config_mod
-from . import limits, outroot, schema, urlpolicy
+from . import limits, outroot, schema, urlpolicy, ytdlp
 from .capabilities import WorkRootError
 from .errors import HINTS, ITEM_STATUS_FOR, JOB_EXIT, REASONS, error_object, item_error
 from .winpath import PathBlocked
@@ -38,12 +38,7 @@ def _tools_present(env, deps):
     package by its metadata, never by importing it."""
     which = deps.get("which") or shutil.which
     version_of = deps.get("version_of") or capabilities.default_version_of
-    if not capabilities.locate_ffmpeg(env, which) or not capabilities.locate_node(which, env):
-        return False
-    try:
-        return bool(version_of("yt-dlp"))
-    except LookupError:
-        return False
+    return ytdlp.find_tools(env, which, version_of) is not None
 
 
 def _item(index, spec, mode, policy, media_hosts, tools_ok):
