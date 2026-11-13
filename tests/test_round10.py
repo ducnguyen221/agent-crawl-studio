@@ -269,16 +269,16 @@ def test_artifact_writer_reconcile_discard_and_sweep(tmp_path):
     job = tmp_path / "job"
     job.mkdir()
     writer = artifacts.ArtifactWriter(str(job))
-    for name in ("0001-aaaa.pdf", "0002-bbbb.txt", "0003-cccc.bin"):
+    for name in ("0001-aaaa000000.pdf", "0002-bbbb000000.txt", "0003-cccc000000.bin"):
         (job / "files" / name).write_bytes(b"x")
     (job / ".tmp" / "0004.part").write_bytes(b"y")
     (job / ".tmp" / "keep.txt").write_bytes(b"z")
     writer.sweep()
     assert os.listdir(job / ".tmp") == ["keep.txt"]
     writer.discard(["0002"])
-    assert sorted(os.listdir(job / "files")) == ["0001-aaaa.pdf", "0003-cccc.bin"]
-    writer.reconcile({"0001-aaaa.pdf"})
-    assert os.listdir(job / "files") == ["0001-aaaa.pdf"]
+    assert sorted(os.listdir(job / "files")) == ["0001-aaaa000000.pdf", "0003-cccc000000.bin"]
+    writer.reconcile({"0001-aaaa000000.pdf"})
+    assert os.listdir(job / "files") == ["0001-aaaa000000.pdf"]
 
 
 def test_ctrl_c_in_create_job_never_removes_a_folder_that_was_already_there(world, server):

@@ -11,7 +11,7 @@ Safe web and media crawling for agents: plan, fetch and extract with a manifest 
 - `tests/test_scaffold.py` checks the structure (manifests, skill front matter, links).
 - `AGENTS.md` holds the rules for agents working in this repository; `ECOSYSTEM.md` states its role and hand-offs.
 
-## Commands (SPR-01)
+## Commands
 
 - `scripts/crawl-studio.ps1 capabilities` prints one JSON line (engine versions, ffmpeg, node, work root). If the core venv is missing it prints a `DEPENDENCY_MISSING` line with the `ensure` hint and exits 0; it never installs anything.
 - `scripts/crawl-studio.ps1 plan --request <file>` (SPR-02, slice A) reads a v1 request (UTF-8 JSON, at most 1 MiB; one leading BOM is accepted, as Windows PowerShell 5.1 writes one) and prints one JSON plan line: per-item `allow`/`blocked` decision with a fixed error code, the output place and the effective limits. It opens no socket, creates nothing, and never opens a request path that starts with two separators (UNC), names a device (`CON`, `NUL`...) or a stream. Exit 0 when the request is valid (blocked items included), 2 when it is refused. With the core venv missing the launcher prints `DEPENDENCY_MISSING` and exits 2 for `plan`/`run` (0 for `capabilities`).

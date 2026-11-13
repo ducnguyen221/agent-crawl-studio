@@ -80,3 +80,21 @@ def no_socket(monkeypatch):
         monkeypatch.setattr(socket, name, recorder(name))
     yield calls
     assert not calls, "socket use recorded: %r" % (calls,)
+
+
+@pytest.fixture(autouse=True)
+def _every_resolver_slot_is_free():
+    """RESOLVER_SLOTS is a process-wide bound; a test that leaves a slow lookup running must not make the next one
+    see fewer slots (RF343): wait, at most a few seconds, until all of them are back."""
+    import time
+    from agent_crawl_studio import netfetch
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        got = [netfetch.RESOLVER_SLOTS.acquire(blocking=False) for _ in range(netfetch.MAX_RESOLVER_THREADS)]
+        for taken in got:
+            if taken:
+                netfetch.RESOLVER_SLOTS.release()
+        if all(got):
+            break
+        time.sleep(0.05)
+    yield

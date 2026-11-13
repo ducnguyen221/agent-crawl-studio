@@ -201,6 +201,7 @@ class PinnedTransport(httpx.BaseTransport):
         backend = network_backend if network_backend is not None else PinnedBackend(policy)
         self._backend = backend
         context = httpx.create_ssl_context(verify=True, trust_env=False)
+        context.keylog_filename = None  # the standard library reads SSLKEYLOGFILE: never write session secrets
         self._pool = httpcore.ConnectionPool(ssl_context=context, network_backend=backend, max_connections=1,
                                              http1=True, http2=False)
 
@@ -244,9 +245,9 @@ def build_client(policy, timeouts, transport=None):
 @dataclasses.dataclass
 class FetchOutcome:
     status: str  # "ok" | "failed" | "blocked"
-    code: str = None
-    reason: str = None
-    http_status: int = None
+    code: str | None = None
+    reason: str | None = None
+    http_status: int | None = None
     retryable: bool = False
     redirects: int = 0
     final_url: str = None
@@ -265,8 +266,9 @@ def _headers_clean(headers):
     kept = {}
     for name in HEADERS_KEPT:
         value = headers.get(name)
-        if value is not None and _clean_header(value):
-            kept[name] = _clean_header(value)
+        cleaned = _clean_header(value) if value is not None else ""
+        if cleaned:
+            kept[name] = cleaned
     return kept
 
 
@@ -275,7 +277,7 @@ def _content_length(headers):
     return int(value) if value.isdigit() else None
 
 
-def _time_left(limits, now, item_deadline, job_deadline):
+def _time_left(now, item_deadline, job_deadline):
     left = item_deadline - now
     if job_deadline is not None:
         left = min(left, job_deadline - now)
@@ -323,7 +325,7 @@ class _Run:
             return self.outcome("failed", "TIMEOUT"), None
         own = self.client is None
         client = build_client(self.policy, self.limits) if own else self.client
-        left = _time_left(self.limits, self.clock(), self.item_deadline, self.job_deadline)
+        left = _time_left(self.clock(), self.item_deadline, self.job_deadline)
         timeout = httpx.Timeout(connect=min(self.limits["connect_timeout"], left),
                                 read=min(self.limits["idle_timeout"], left),
                                 write=min(self.limits["idle_timeout"], left),
@@ -439,7 +441,9 @@ class _Run:
 def fetch_item(url, expect, limits, sink, policy, client=None, *, total_remaining=None, clock=time.monotonic,
                job_deadline=None):
     """Download one URL into `sink(chunk)`. Returns a FetchOutcome; never raises for a network or policy
-    problem. `redirects` counts the redirects that were followed (a response received after the first)."""
+    problem. `redirects` counts the redirects that were followed (a response received after the first).
+    `client` is only a hook for tests (a client handed over is still held back: no redirects, no cookies, no
+    authentication, a fixed set of headers); the command line and the launcher never pass one."""
     run = _Run(expect, limits, sink, policy, client, total_remaining, clock, job_deadline)
     try:
         target = urlpolicy.check_url(url, policy)

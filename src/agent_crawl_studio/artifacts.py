@@ -22,6 +22,8 @@ MAX_SUFFIX = 99
 HEAD_KEPT = 512
 DECLARED_TYPE = re.compile(r"^[a-z0-9][a-z0-9.+-]*/[a-z0-9][a-z0-9.+-]*$")
 MAX_DECLARED = 100
+FINISHED_NAME = re.compile(r"^[0-9]{4}-[0-9a-f]{10}(-[0-9]+)?\.[a-z0-9]+$")  # what _place can have made
+PART_NAME = re.compile(r"^[0-9]{4}\.part$")
 
 
 class ArtifactError(Exception):
@@ -115,31 +117,40 @@ class ArtifactWriter:
                     os.remove(path)
             raise
 
+    def _folder_ok(self, folder):
+        """A cleanup walks a folder only when it is still the plain folder of this job (a junction put in its
+        place would turn the cleanup into deleting somebody else's files)."""
+        if self._check is None:
+            return True
+        try:
+            self._check(folder)
+        except Exception:  # noqa: BLE001 - PathBlocked or OSError: do not touch it
+            return False
+        return True
+
+    def _remove_matching(self, folder, wanted):
+        if not self._folder_ok(folder):
+            return
+        with contextlib.suppress(OSError):
+            for name in os.listdir(folder):
+                if wanted(name):
+                    with contextlib.suppress(OSError):
+                        os.remove(os.path.join(folder, name))
+
     def discard(self, item_ids):
         """Remove the finished files of items that never reached the manifest (their names start with the id)."""
-        with contextlib.suppress(OSError):
-            for name in os.listdir(self.files_dir):
-                if any(name.startswith(item_id + "-") for item_id in item_ids):
-                    with contextlib.suppress(OSError):
-                        os.remove(os.path.join(self.files_dir, name))
+        self._remove_matching(self.files_dir, lambda name: FINISHED_NAME.match(name) and name[:4] in item_ids)
 
     def reconcile(self, keep):
         """After a cancelled run: remove every finished file that is not in `keep` (the names the manifest lists).
-        A handle that an interrupted write left dangling is freed first (a file in use cannot be removed)."""
+        A handle that an interrupted write left dangling is freed first (a file in use cannot be removed); that
+        gc.collect() is only worth its cost here, on an interrupted run."""
         gc.collect()
-        with contextlib.suppress(OSError):
-            for name in os.listdir(self.files_dir):
-                if name not in keep:
-                    with contextlib.suppress(OSError):
-                        os.remove(os.path.join(self.files_dir, name))
+        self._remove_matching(self.files_dir, lambda name: FINISHED_NAME.match(name) and name not in keep)
 
     def sweep(self):
         """Remove every .part of this job (after an interrupt nobody else can be writing them)."""
-        with contextlib.suppress(OSError):
-            for name in os.listdir(self.tmp_dir):
-                if name.endswith(".part"):
-                    with contextlib.suppress(OSError):
-                        os.remove(os.path.join(self.tmp_dir, name))
+        self._remove_matching(self.tmp_dir, PART_NAME.match)
 
     def abort(self, part):
         part.close()

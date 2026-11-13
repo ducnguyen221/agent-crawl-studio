@@ -1,9 +1,12 @@
-"""Planner (Slice A): `plan` reports what `run` would do. No socket is opened (names are never resolved),
-nothing is created or written, and the output place is decided only by `outroot.resolve_output`.
+"""The planner and the runner. `plan` reports what `run` would do: no socket is opened (names are never resolved),
+nothing is created or written, and the output place is decided only by `outroot.resolve_output`. `run` downloads
+the batch into a new job folder, one item after another, and ends every path (also Ctrl+C) with a result.
 
-`deps` is a dict that only code (tests) fills: `policy` (urlpolicy.Policy) and the outroot system-call
-parameters `attrs_of`, `drive_type_of`, `sync_root_of`, `free_bytes_of`, `realpath`. No option, environment
-variable, config key or request field reaches it (SPEC FR2.8)."""
+`deps` is a dict that only code (tests) fills; the command line and the launcher pass none: `policy`
+(urlpolicy.Policy), the outroot system-call parameters `attrs_of`, `drive_type_of`, `sync_root_of`,
+`free_bytes_of`, `realpath`, and for `run` the hooks `fetch`, `clock`, `now`, `token_of`, `sleep`, `rename`,
+`replace`, `motw`, `create_job`. No option, environment variable, config key or request field reaches it
+(SPEC FR2.8)."""
 
 import contextlib
 import os
@@ -289,7 +292,8 @@ def _refuse(request, warnings, job_dir, error, moment_of):
 
 
 def _start_job(request, env, deps, policy, warnings, moment_of, state):
-    """Config, output place, job folder, writers. Returns (job pieces, None) or (None, (result, 2))."""
+    """Config, output place, job folder, writers. Returns (job pieces, None) or (None, (result, exit code)): exit
+    2 for a refusal, 130 (status `cancelled`) for a Ctrl+C while the job was being set up."""
     try:
         cfg = config_mod.load_config(env)
         out_params = {key: deps[key] for key in OUTROOT_PARAMS if key in deps}
@@ -365,11 +369,38 @@ def _record(mf, log, job, entry):
                 break
             except KeyboardInterrupt:
                 job.cancelled = True
+    if not any(item is entry for item in mf.doc["items"]):  # two interrupts in a row before the append: keep it
+        mf.add_item(entry, write=False)
 
 
 def _listed(doc):
     """The file names a manifest lists."""
     return {os.path.basename(artifact["path"]) for item in doc["items"] for artifact in item["artifacts"]}
+
+
+def _again(step):
+    """Run `step`; a Ctrl+C inside the safety net is taken and the step is repeated (twice at most, then once more
+    unguarded): every step is idempotent."""
+    for _ in range(2):
+        try:
+            return step()
+        except KeyboardInterrupt:
+            pass
+    return step()
+
+
+def _add_missing(request, mf, writer, policy):
+    for index, spec in enumerate(request.urls, 1):
+        if index > len(mf.doc["items"]):
+            writer.discard(["%04d" % index])  # a file placed for an item that was never recorded
+            mf.add_item(_entry(policy, index, spec, "CANCELLED"), write=False)
+
+
+def _finish_cancelled(mf, moment_of):
+    try:  # the file if it can be written, else the memory copy with a warning
+        mf.finish("cancelled", _stamp(moment_of()), None, [], write=True)
+    except manifest.ManifestError:
+        mf.finish("cancelled", _stamp(moment_of()), None, ["manifest_not_updated"], write=False)
 
 
 def _salvage(request, state, policy, moment_of):
@@ -378,29 +409,24 @@ def _salvage(request, state, policy, moment_of):
     cancelled and end the job as `cancelled`, unless it had already ended (then its own answer stands)."""
     writer, mf, job_dir = state.get("writer"), state.get("mf"), state.get("job_dir")
     if writer is not None:
-        writer.sweep()
+        _again(writer.sweep)
     if mf is None or mf.doc is None:
         if job_dir is not None:
             _undo_job(job_dir)
         return _rejected(request, state["warnings"], error_object("CANCELLED"), moment_of(), 130, "cancelled")
     if mf.doc["status"] is None:
-        for index, spec in enumerate(request.urls, 1):
-            if index > len(mf.doc["items"]):
-                writer.discard(["%04d" % index])  # a file placed for an item that was never recorded
-                mf.add_item(_entry(policy, index, spec, "CANCELLED"), write=False)
-        writer.reconcile(_listed(mf.doc))  # a manifest exists, so the writer does too
-        try:  # the file if it can be written, else the memory copy with a warning
-            mf.finish("cancelled", _stamp(moment_of()), None, [], write=True)
-        except (manifest.ManifestError, KeyboardInterrupt):
-            mf.finish("cancelled", _stamp(moment_of()), None, ["manifest_not_updated"], write=False)
-    state["log"].close()  # likewise
+        _again(lambda: _add_missing(request, mf, writer, policy))
+        _again(lambda: writer.reconcile(_listed(mf.doc)))  # a manifest exists, so the writer does too
+        _again(lambda: _finish_cancelled(mf, moment_of))
+    _again(state["log"].close)  # likewise
     return mf.doc, JOB_EXIT[mf.doc["status"]]
 
 
 def run(request, env, deps=None):
     """Download the batch described by `request` into a new job folder. Returns (result, exit code); the result
     is the final manifest. Items run one after another, in order; a failure of one never stops the others.
-    Ctrl+C never leaves `run`: it ends as `cancelled` (exit 130) with whatever exists, cleaned up."""
+    A Ctrl+C ends as `cancelled` (exit 130) with whatever exists, cleaned up: it leaves `run` only in its first few
+    lines (before anything exists) or as a second interrupt inside the safety net's own retries."""
     deps = deps or {}
     policy = deps.get("policy") or urlpolicy.Policy()
     moment_of = deps.get("now") or (lambda: datetime.now(timezone.utc))
