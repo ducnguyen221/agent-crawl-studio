@@ -22,13 +22,18 @@ class ManifestError(Exception):
     """manifest.json could not be rewritten (OUTPUT_WRITE_FAILED); the previous file is intact."""
 
 
+def strip_unwanted(value):
+    """`value` without control, format, surrogate or line-separator characters (U+0000-001F, U+007F-009F, bidi
+    marks, ZERO WIDTH SPACE, BOM...), not cut. Not a string gives an empty text."""
+    if not isinstance(value, str):
+        return ""
+    return "".join(ch for ch in value if unicodedata.category(ch) not in ("Cc", "Cf", "Cs", "Zl", "Zp"))
+
+
 def untrusted_text(value):
     """Text from the source made safe to store: no control, format, surrogate or line-separator characters
     (U+0000-001F, U+007F-009F, bidi marks, BOM...), at most 200 characters."""
-    if not isinstance(value, str):
-        return ""
-    kept = "".join(ch for ch in value if unicodedata.category(ch) not in ("Cc", "Cf", "Cs", "Zl", "Zp"))
-    return kept[:MAX_UNTRUSTED]
+    return strip_unwanted(value)[:MAX_UNTRUSTED]
 
 
 def clean_untrusted(values):
@@ -92,8 +97,10 @@ class ManifestWriter:
         if write:
             self._write()
 
-    def finish(self, status, finished_at, error=None, warnings=(), write=True):
+    def finish(self, status, finished_at, error=None, warnings=(), write=True, network_bytes=None):
         self.doc["status"], self.doc["finished_at"] = status, finished_at
+        if network_bytes is not None:  # the bytes the job received from the network (FR23.3)
+            self.doc["network_bytes"] = network_bytes
         if error is not None:
             self.doc["error"] = error
         self.doc["warnings"] += [warning for warning in warnings if warning not in self.doc["warnings"]]

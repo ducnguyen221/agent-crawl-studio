@@ -190,6 +190,9 @@ def validate_result(obj):
     problems = [key for key in RESULT_KEYS if key not in obj]
     if "retry_of" in obj and not (isinstance(obj["retry_of"], str) and JOB_ID.fullmatch(obj["retry_of"])):
         problems.append("retry_of")  # FR15.5: the id of the job that was tried again
+    if "network_bytes" in obj and (isinstance(obj["network_bytes"], bool) or not isinstance(obj["network_bytes"], int)
+                                   or obj["network_bytes"] < 0):
+        problems.append("network_bytes")  # FR23.3: a whole number, 0 or more, when present
     if obj.get("status") is not None and not (isinstance(obj["status"], str) and obj["status"] in JOB_EXIT):
         problems.append("status")
     if obj.get("counts") is not None and not isinstance(obj["counts"], dict):  # a text or a list is not a count table

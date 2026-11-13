@@ -11,6 +11,7 @@ the batch into a new job folder, one item after another, and ends every path (al
 import contextlib
 import dataclasses
 import os
+import re
 import shutil
 import threading
 import time
@@ -131,6 +132,9 @@ UNTRUSTED_HEADERS = (("content-type", "content_type"), ("content-disposition", "
                      ("last-modified", "last_modified"), ("retry-after", "retry_after"))
 REASON_CODES = ("NETWORK_ERROR", "CONTENT_MISMATCH")
 EGRESS_LOG_LINES = 10000
+NETWORK_FACTOR = 2  # the network budget of an item / a job is this many times its size limit (FR23, DN19)
+EGRESS_LINE_MAX = 200
+HEX_TOKEN = re.compile(r"[0-9a-f]{64}(?=:x@)")  # the shape of a proxy token in front of `:x@` (FR24.1)
 MEDIA_DEPS = ("engine_prefix", "spawn", "kill_tree", "scan", "poll", "environ", "proxy_url")
 
 
@@ -251,6 +255,9 @@ class _Job:
         self.free_bytes_of = deps.get("free_bytes_of", outroot.default_free_bytes_of)
         self.deadline = self.clock() + self.limits["job_timeout"]
         self.used = 0
+        self.net_item = 0  # bytes received from the network by the item in hand, over all its attempts (FR23.1)
+        self.net_job = 0  # ... by the whole job (FR23.2)
+        self.tokens = []  # the token of every proxy this job started (FR24.1)
         self.cancelled = self.timed_out = False
         self.stop_code = None  # a code that fails every item that follows
 
@@ -260,11 +267,23 @@ class _Job:
     def next_item(self, index, spec):
         return self.run_with_retries(index, spec)
 
+    def net_room(self):
+        """What the item in hand may still receive from the network: the rest of its budget (2 x `max_bytes_per_file`
+        minus what its attempts took) or of the job's (2 x `max_total_bytes`), whichever is less; never below 0."""
+        return max(min(NETWORK_FACTOR * self.limits["max_bytes_per_file"] - self.net_item,
+                       NETWORK_FACTOR * self.limits["max_total_bytes"] - self.net_job), 0)
+
+    def count_net(self, count):
+        """Bytes that came in from the network, for the item and for the job."""
+        self.net_item += count
+        self.net_job += count
+
     def run_with_retries(self, index, spec):
         """One item, tried again while its trouble can pass by itself (FR14, `retrying.should_retry`): at most
         `retries` more times, after the wait of `retrying.wait_seconds`, never past the job's deadline. Every attempt
         is a whole item of its own (its own part file, folder, proxy). A Ctrl+C in the wait leaves like any other."""
         attempt = 0
+        self.net_item = 0
         while True:
             attempt += 1
             self.attempt, self.timeout_kind = attempt, None
@@ -274,6 +293,8 @@ class _Job:
             if attempt > self.limits["retries"] or self.cancelled or self.stop_code or self.timed_out:
                 return entry
             if not retrying.should_retry(entry, entry.get("adapter"), self.timeout_kind):
+                return entry
+            if self.net_room() == 0:  # FR23.1: no network budget left: no further attempt, the last error stays
                 return entry
             retry_after = entry.get("untrusted", {}).get("retry_after") if entry.get("http_status") in (
                 retrying.RETRY_AFTER_STATUSES) else None
@@ -298,6 +319,8 @@ class _Job:
             adapter = router.route(norm, self.request.mode, self.media_hosts)
         except urlpolicy.Blocked:
             return self.entry(index, spec, "URL_BLOCKED")
+        if self.net_room() == 0:  # FR23.2: the job's network budget is spent: this item opens no connection
+            return self.entry(index, spec, "SIZE_LIMIT", adapter=router.ADAPTER_MEDIA if adapter == router.ADAPTER_MEDIA else None)
         if adapter == router.ADAPTER_MEDIA:
             return self.media(index, spec, norm)
         return self.download(index, spec)
@@ -315,13 +338,13 @@ class _Job:
         folder away on every way out (a Ctrl+C passes through after the cleanup)."""
         item_id = "%04d" % index
         item_root = os.path.join(self.job_dir, ".tmp", item_id if self.attempt == 1 else "%s-%d" % (item_id, self.attempt))
-        proxy = None
+        proxy = proxy_url = None
         try:
             dirs = ytdlp.make_item_dirs(self.job_dir, item_id, self.check, self.attempt)
             room = max(self.free_bytes_of(self.job_dir) - FREE_RESERVE, 0)
             limits = dict(self.limits, media_item_timeout=max(min(
                 self.limits["media_item_timeout"], self.deadline - self.clock()), 0))
-            proxy = self.egress_of(self.policy, byte_cap=2 * self.limits["max_bytes_per_file"],
+            proxy = self.egress_of(self.policy, byte_cap=self.net_room(),
                                    connect_timeout=self.limits["connect_timeout"], log=self.egress_line)
             try:
                 proxy_url = proxy.start()
@@ -330,6 +353,7 @@ class _Job:
                                   hint=HINTS["proxy_unavailable"])
             deps = dict(self.media_deps, proxy_url=proxy_url)
             token = proxy_url.split("//", 1)[-1].split(":", 1)[0]
+            self.tokens.append(token)
             outcome = ytdlp.run_media_item(norm.url, item_id, dirs, limits, tools,
                                            budget=max(self.limits["max_total_bytes"] - self.used, 0), room=room,
                                            clock=self.clock, deps=deps, proxy=proxy)
@@ -348,13 +372,20 @@ class _Job:
             try:
                 if proxy is not None:
                     proxy.stop()  # after `run_media_item` ended the tree; the port and tunnels close <= 2 s (FR13.8)
+                    if proxy_url is not None:
+                        self.count_net(proxy.bytes_in)  # what came back through it, whatever way the item ended
             finally:
                 ytdlp.clear_item_dir(item_root, self.check)
 
     def egress_line(self, line):
         """logs/egress.log: one line per CONNECT the proxies saw, at most 10 000 lines a job, written under a lock;
         the file is created exclusively and checked once, then kept open (never reopened by path, like run.log);
-        a log that cannot be written never fails an item (FR13.8)."""
+        a log that cannot be written never fails an item (FR13.8). Every line is made safe in a fixed order (FR24.1):
+        filter the characters, then hide the tokens, then cut the length - a hidden character between the letters of
+        a token only joins them after the filter, so the hiding must come after it."""
+        line = manifest.strip_unwanted(line)
+        line = ytdlp.redact_log(line, secrets=tuple(self.tokens))
+        line = HEX_TOKEN.sub("REDACTED", line)[:EGRESS_LINE_MAX]
         with self.egress_lock:
             if self.egress_dead or self.egress_lines >= EGRESS_LOG_LINES:
                 return
@@ -367,7 +398,7 @@ class _Job:
                     self.egress_out = open(path, "x", encoding="utf-8", newline="\n")
                     if self.check is not None:
                         self.check(path)
-                self.egress_out.write(manifest.untrusted_text(line) + "\n")
+                self.egress_out.write(line + "\n")
                 self.egress_out.flush()
                 self.egress_lines += 1
             except PathBlocked:  # the file we just made sits somewhere it must not: take it away, stop logging
@@ -464,19 +495,24 @@ class _Job:
         except Exception as exc:  # noqa: BLE001 - a probe that fails fails this item, not the job
             return self.fail(index, spec, part, "OUTPUT_WRITE_FAILED" if isinstance(exc, OSError) else "TOOL_FAILED")
 
+        counted = [0]
+
         def sink(chunk):
             if part.bytes + len(chunk) > room:
                 raise outroot.WriteBlocked(0, "space")
             part.write(chunk)
+            self.count_net(len(chunk))  # counted as it comes, so that a Ctrl+C keeps what was received (FR23.3)
+            counted[0] += len(chunk)
 
         try:
             outcome = self.fetch(spec.url, spec.expect, self.limits, sink, self.policy,
                                  total_remaining=max(self.limits["max_total_bytes"] - self.used, 0),
-                                 clock=self.clock, job_deadline=self.deadline)
+                                 clock=self.clock, job_deadline=self.deadline, network_room=self.net_room())
         except (OSError, outroot.WriteBlocked):  # the disk, not the network
             return self.fail(index, spec, part, "OUTPUT_WRITE_FAILED")
         except Exception:  # noqa: BLE001 - an unexpected failure fails this item only; its text is never kept
             return self.fail(index, spec, part, "TOOL_FAILED")
+        self.count_net(max(getattr(outcome, "bytes_received", 0) - counted[0], 0))  # held back, or past the sink
         if outcome.status != "ok":
             if outcome.code == "TIMEOUT" and self.clock() >= self.deadline:
                 self.timed_out = True
@@ -654,11 +690,11 @@ def _add_missing(request, mf, writer, policy, indices):
             mf.add_item(_entry(policy, index, spec, "CANCELLED"), write=False)
 
 
-def _finish_cancelled(mf, moment_of):
+def _finish_cancelled(mf, moment_of, net=None):
     try:  # the file if it can be written, else the memory copy with a warning
-        mf.finish("cancelled", _stamp(moment_of()), None, [], write=True)
+        mf.finish("cancelled", _stamp(moment_of()), None, [], write=True, network_bytes=net)
     except manifest.ManifestError:
-        mf.finish("cancelled", _stamp(moment_of()), None, ["manifest_not_updated"], write=False)
+        mf.finish("cancelled", _stamp(moment_of()), None, ["manifest_not_updated"], write=False, network_bytes=net)
 
 
 def _salvage(request, state, policy, moment_of):
@@ -675,7 +711,8 @@ def _salvage(request, state, policy, moment_of):
     if mf.doc["status"] is None:
         _retry_interrupt(lambda: _add_missing(request, mf, writer, policy, state["indices"]))
         _retry_interrupt(lambda: writer.reconcile(_listed(mf.doc)))  # a manifest exists, so the writer does too
-        _retry_interrupt(lambda: _finish_cancelled(mf, moment_of))
+        job = state.get("job")
+        _retry_interrupt(lambda: _finish_cancelled(mf, moment_of, None if job is None else job.net_job))
     _retry_interrupt(state["log"].close)  # likewise
     return mf.doc, JOB_EXIT[mf.doc["status"]]
 
@@ -711,19 +748,21 @@ def _write_final(mf, job, status, error, extra, manifest_failed, moment_of):
     done = False
     for _ in range(3):
         try:
-            mf.finish(status, _stamp(moment_of()), error, extra, write=not manifest_failed)
+            mf.finish(status, _stamp(moment_of()), error, extra, write=not manifest_failed, network_bytes=job.net_job)
             done = True
             break
         except KeyboardInterrupt:
             job.cancelled, status = True, "cancelled"
         except manifest.ManifestError:
             status, done = "failed", True
-            mf.finish(status, _stamp(moment_of()), error_object("OUTPUT_WRITE_FAILED"), ["manifest_not_updated"], write=False)
+            mf.finish(status, _stamp(moment_of()), error_object("OUTPUT_WRITE_FAILED"), ["manifest_not_updated"], write=False,
+                      network_bytes=job.net_job)
             break
     if not done:  # interrupted every time: the memory copy is the result, and it says the file is not up to date
         for _ in range(3):
             try:
-                mf.finish(status, _stamp(moment_of()), error, extra + ["manifest_not_updated"], write=False)
+                mf.finish(status, _stamp(moment_of()), error, extra + ["manifest_not_updated"], write=False,
+                          network_bytes=job.net_job)
                 break
             except KeyboardInterrupt:
                 status = "cancelled"
@@ -736,7 +775,7 @@ def _run(request, env, deps, policy, moment_of, state):
     if refusal is not None:
         return refusal
     job_dir, writer, mf, log = pieces
-    job = _Job(request, deps, policy, writer, job_dir, _media_hosts(env), env, state.get("check"))
+    job = state["job"] = _Job(request, deps, policy, writer, job_dir, _media_hosts(env), env, state.get("check"))
     log.closers.append(job.close_egress_log)  # closed wherever the run log is: both ends have their Ctrl+C retries
     manifest_failed = False
     for index, spec in zip(state["indices"], request.urls):

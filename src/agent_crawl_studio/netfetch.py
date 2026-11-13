@@ -321,9 +321,11 @@ def _time_left(now, item_deadline, job_deadline):
 class _Run:
     """The state of one fetch_item call."""
 
-    def __init__(self, expect, limits, sink, policy, client, total_remaining, clock, job_deadline):
+    def __init__(self, expect, limits, sink, policy, client, total_remaining, clock, job_deadline, network_room=None):
         self.expect, self.limits, self.sink, self.policy, self.client = expect, limits, sink, policy, client
         self.total_remaining, self.clock, self.job_deadline = total_remaining, clock, job_deadline
+        self.network_room = network_room  # what the whole item may still receive from the network (FR23.1)
+        self.net = 0  # body bytes received from the network by this call, over every hop (also when it fails)
         self.item_deadline = clock() + limits["item_timeout"]
         self.step = 0
         self.first_path = ""
@@ -333,6 +335,7 @@ class _Run:
         self.left = None  # the time the request in hand was allowed, set by `hop`
 
     def outcome(self, status, code=None, reason=None, http_status=None, **extra):
+        extra.setdefault("bytes_received", self.net)
         if code == "NETWORK_ERROR":
             # a 5xx may pass; a 4xx, a forbidden answer and a certificate that does not verify will not by themselves
             retryable = http_status >= 500 if reason == "http_status" else reason not in ("forbidden", "tls_verify_failed")
@@ -464,6 +467,9 @@ class _Run:
         self.received, self.declared, self.cap, self.http = 0, declared, cap, status
         held, sniffing = b"", binary_url  # a binary file is judged on its first 512 bytes (or all of a shorter body)
         for chunk in response.iter_raw():
+            self.net += len(chunk)
+            if self.network_room is not None and self.net > self.network_room:  # FR23.1: the item's network budget
+                return self.outcome("failed", "SIZE_LIMIT", None, status)
             if sniffing:
                 held += chunk
                 if len(held) < sniff.HEAD_BYTES:
@@ -486,16 +492,18 @@ class _Run:
                 return stop
         if declared is not None and self.received < declared:
             return self.outcome("failed", "NETWORK_ERROR", "truncated_body", status)
-        return self.outcome("ok", http_status=status, bytes_received=self.received)
+        return self.outcome("ok", http_status=status)
 
 
 def fetch_item(url, expect, limits, sink, policy, client=None, *, total_remaining=None, clock=time.monotonic,
-               job_deadline=None):
+               job_deadline=None, network_room=None):
     """Download one URL into `sink(chunk)`. Returns a FetchOutcome; never raises for a network or policy
     problem. `redirects` counts the redirects that were followed (a response received after the first).
     `client` is only a hook for tests (a client handed over is still held back: no redirects, no cookies, no
-    authentication, a fixed set of headers); the command line and the launcher never pass one."""
-    run = _Run(expect, limits, sink, policy, client, total_remaining, clock, job_deadline)
+    authentication, a fixed set of headers); the command line and the launcher never pass one.
+    `network_room` is what the item may still receive over all its attempts (FR23.1): a body that crosses it ends
+    `SIZE_LIMIT`. `bytes_received` is what came in from the network, whatever the outcome."""
+    run = _Run(expect, limits, sink, policy, client, total_remaining, clock, job_deadline, network_room)
     try:
         target = urlpolicy.check_url(url, policy)
     except urlpolicy.Blocked as exc:
