@@ -76,6 +76,8 @@ HINTS = {
     "tools_missing": "install ffmpeg, node and the core venv; nothing was installed",
     "job_object_unavailable": "the process could not be contained; it was stopped",
     "proxy_unavailable": "the local egress proxy could not start; nothing was downloaded",
+    "extract_failed": "the page could not be turned into text; details were not printed",
+    "extract_engine_missing": "run opcos-runtime ensure for this repo; nothing was installed",
 }
 
 
