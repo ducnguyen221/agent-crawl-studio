@@ -9,6 +9,7 @@ the batch into a new job folder, one item after another, and ends every path (al
 (SPEC FR2.8)."""
 
 import contextlib
+import dataclasses
 import os
 import shutil
 import threading
@@ -586,7 +587,7 @@ def _open_writers(job_dir, root, out_params, deps, request, warnings, started, j
         log = RunLog(job_dir, check)
         mf = manifest.ManifestWriter(job_dir, replace=deps.get("replace", os.replace), sleep=sleep, check=check)
         state["log"], state["mf"], state["check"] = log, mf, check
-        mf.start(job_id, _stamp(started), request.limits_effective, len(request.urls), warnings)
+        mf.start(job_id, _stamp(started), request.limits_effective, len(request.urls), warnings, state.get("retry_of"))
     except KeyboardInterrupt:  # Ctrl+C while the job is being set up: take it away again, say `cancelled`
         return None, _refuse(request, warnings, job_dir, None, moment_of)
     except (PathBlocked, artifacts.ArtifactError, manifest.ManifestError, OSError) as exc:
@@ -641,9 +642,12 @@ def _retry_interrupt(step, tries=2):
     return step()
 
 
-def _add_missing(request, mf, writer, policy):
-    for index, spec in enumerate(request.urls, 1):
-        if index > len(mf.doc["items"]):
+def _add_missing(request, mf, writer, policy, indices):
+    """Every item this job was to run that the manifest does not list yet, as cancelled (by id, not by place:
+    a `retry` job runs ids that are not 1, 2, 3...)."""
+    listed = {item["id"] for item in mf.doc["items"]}
+    for index, spec in zip(indices, request.urls):
+        if "%04d" % index not in listed:
             writer.discard(["%04d" % index])  # a file placed for an item that was never recorded
             mf.add_item(_entry(policy, index, spec, "CANCELLED"), write=False)
 
@@ -667,14 +671,23 @@ def _salvage(request, state, policy, moment_of):
             _undo_job(job_dir)
         return _rejected(request, state["warnings"], error_object("CANCELLED"), moment_of(), 130, "cancelled")
     if mf.doc["status"] is None:
-        _retry_interrupt(lambda: _add_missing(request, mf, writer, policy))
+        _retry_interrupt(lambda: _add_missing(request, mf, writer, policy, state["indices"]))
         _retry_interrupt(lambda: writer.reconcile(_listed(mf.doc)))  # a manifest exists, so the writer does too
         _retry_interrupt(lambda: _finish_cancelled(mf, moment_of))
     _retry_interrupt(state["log"].close)  # likewise
     return mf.doc, JOB_EXIT[mf.doc["status"]]
 
 
-def run(request, env, deps=None):
+def _scoped(request, only):
+    """(the request of the items to run, their 1-based ids). `only` (a `retry` job) picks items of the old request;
+    each keeps its own id, so the new job names them as the old one did."""
+    if only is None:
+        return request, list(range(1, len(request.urls) + 1))
+    indices = sorted(set(only))
+    return dataclasses.replace(request, urls=[request.urls[index - 1] for index in indices]), indices
+
+
+def run(request, env, deps=None, *, only=None, retry_of=None):
     """Download the batch described by `request` into a new job folder. Returns (result, exit code); the result
     is the final manifest. Items run one after another, in order; a failure of one never stops the others.
     A Ctrl+C ends as `cancelled` (exit 130) with whatever exists, cleaned up: it leaves `run` only in its first few
@@ -682,8 +695,9 @@ def run(request, env, deps=None):
     deps = deps or {}
     policy = deps.get("policy") or urlpolicy.Policy()
     moment_of = deps.get("now") or (lambda: datetime.now(timezone.utc))
-    state = {"warnings": list(request.warnings)}
+    state = {"warnings": list(request.warnings), "indices": None, "retry_of": retry_of}
     try:
+        request, state["indices"] = _scoped(request, only)
         return _run(request, env, deps, policy, moment_of, state)
     except KeyboardInterrupt:
         return _salvage(request, state, policy, moment_of)
@@ -697,7 +711,7 @@ def _run(request, env, deps, policy, moment_of, state):
     job = _Job(request, deps, policy, writer, job_dir, _media_hosts(env), env, state.get("check"))
     log.closers.append(job.close_egress_log)  # closed wherever the run log is: both ends have their Ctrl+C retries
     manifest_failed = False
-    for index, spec in enumerate(request.urls, 1):
+    for index, spec in zip(state["indices"], request.urls):
         if manifest_failed:  # nothing more is run, but the result still lists every item (SPEC FR3.5)
             mf.add_item(job.entry(index, spec, skipped=True), write=False)
             continue

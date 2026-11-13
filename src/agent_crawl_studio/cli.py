@@ -14,8 +14,9 @@ from . import schema, winpath
 from .errors import EXIT_FOR, ContractError, error_object
 
 # The whole public surface. No option here can weaken a policy (SPEC FR2.8).
-COMMANDS = {"capabilities": (), "plan": ("--request",), "run": ("--request",)}
-USAGE = "usage: crawl-studio capabilities | plan --request <file> | run --request <file>"
+COMMANDS = {"capabilities": (), "plan": ("--request",), "run": ("--request",), "retry": ("--manifest", "--request")}
+USAGE = ("usage: crawl-studio capabilities | plan --request <file> | run --request <file> | "
+         "retry --manifest <file> --request <file>")
 
 
 def _emit(out, obj):
@@ -101,6 +102,33 @@ def _run(out, env, args, run_fn):
     return code
 
 
+def _retry(out, env, args, retry_fn):
+    """`retry --manifest <file> --request <file>`: both are read before anything is made (FR15.1)."""
+    try:
+        request = schema.parse_request(_read_request(args[4]))
+    except ContractError as exc:
+        _emit(out, _refusal(error_object("INVALID_REQUEST", hint=exc.hint)))
+        return 2
+    if retry_fn is None:
+        from . import retrycmd  # imported late, like the runner
+        retry_fn = retrycmd.retry
+    try:
+        result, code = retry_fn(args[2], request, env)
+    except ContractError as exc:  # the manifest, or its match with the request (FR15.2-FR15.4)
+        _emit(out, _refusal(error_object("INVALID_REQUEST", hint=exc.hint)))
+        return 2
+    except cap.WorkRootError:
+        _emit(out, _refusal(error_object("WORK_ROOT_UNKNOWN")))
+        return 2
+    _emit(out, result)
+    return code
+
+
+def _refusal(error):
+    """The result of a command that was refused before a job was made."""
+    return {"schema_version": schema.SCHEMA_VERSION, "kind": "result", "job_id": None, "status": "failed", "error": error}
+
+
 def _valid(argv):
     """argv must be `<command>` followed by exactly the (flag, value) pairs COMMANDS lists for it."""
     spec = COMMANDS.get(argv[0]) if argv else None
@@ -127,7 +155,7 @@ def _quiet():
 
 
 def main(argv, out=None, env=None, which=None, run=None, version_of=None, build=None, plan_fn=None,
-         run_fn=None):
+         run_fn=None, retry_fn=None):
     out = out if out is not None else sys.stdout
     argv = list(argv)
     if not _valid(argv):
@@ -139,6 +167,8 @@ def main(argv, out=None, env=None, which=None, run=None, version_of=None, build=
         try:
             if argv[0] == "plan":
                 return _plan(out, env, argv, plan_fn)
+            if argv[0] == "retry":
+                return _retry(out, env, argv, retry_fn)
             return _run(out, env, argv, run_fn)
         except KeyboardInterrupt:
             _emit(out, {"schema_version": schema.SCHEMA_VERSION, "error": error_object("INTERRUPTED")})
