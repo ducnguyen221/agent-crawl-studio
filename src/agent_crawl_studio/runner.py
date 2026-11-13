@@ -293,6 +293,8 @@ class _Job:
             return self.entry(index, spec, "OUTPUT_PATH_BLOCKED")
         except OSError:  # the disk (folders, the free-space probe), not the engine
             return self.entry(index, spec, "OUTPUT_WRITE_FAILED")
+        except Exception:  # noqa: BLE001 - one item's surprise fails that item only (a Ctrl+C still passes through)
+            return self.entry(index, spec, "TOOL_FAILED", adapter=router.ADAPTER_MEDIA)
         finally:
             ytdlp.clear_item_dir(item_root, self.check)
 
@@ -302,10 +304,13 @@ class _Job:
             text = ytdlp.redact_log(ytdlp.read_tail(os.path.join(dirs.io, "stderr.bin")))
             lines = [manifest.untrusted_text(line) for line in text.splitlines()]
             if any(lines):
-                with open(os.path.join(self.job_dir, "logs", "%s-ytdlp.log" % item_id), "x", encoding="utf-8",
+                logs = os.path.join(self.job_dir, "logs")
+                if self.check is not None:
+                    self.check(logs)  # a junction in the place of logs/ would send the log out of the job
+                with open(os.path.join(logs, "%s-ytdlp.log" % item_id), "x", encoding="utf-8",
                           newline="\n") as out:
                     out.write("\n".join(lines) + "\n")
-        except OSError:
+        except (OSError, PathBlocked):
             pass  # a log that cannot be written never fails the item
 
     def media_result(self, index, spec, norm, tools, outcome):
@@ -323,7 +328,8 @@ class _Job:
         try:
             artifact = self.writer.adopt(
                 "%04d" % index, outcome.file_path, source_url_redacted=redacted, host_url=redacted,
-                engine="yt-dlp", engine_version=tools.version, max_bytes=self.limits["max_bytes_per_file"],
+                engine="yt-dlp", engine_version=tools.version,
+                max_bytes=min(self.limits["max_bytes_per_file"], max(self.limits["max_total_bytes"] - self.used, 0)),
                 allowed_mimes=sniff.MEDIA_MIMES)
         except PathBlocked:
             self.stop_code = "OUTPUT_PATH_BLOCKED"
@@ -607,8 +613,10 @@ def _run(request, env, deps, policy, moment_of, state):
             continue
         try:
             entry = job.next_item(index, spec)
-        except KeyboardInterrupt:  # anywhere in an item that its own handlers do not cover
+        except KeyboardInterrupt as stop:  # anywhere in an item that its own handlers do not cover
             job.cancelled = True
+            if getattr(stop, "process_tree_not_empty", False) and "process_tree_not_empty" not in job.warnings:
+                job.warnings.append("process_tree_not_empty")
             writer.sweep()  # a .part opened just before the interrupt may not have reached its owner
             writer.discard(["%04d" % index])
             entry = job.entry(index, spec, "CANCELLED")
