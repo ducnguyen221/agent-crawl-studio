@@ -11,12 +11,14 @@ MiB = 2 ** 20
 DEFAULTS = {
     "max_items": 100, "max_bytes_per_file": 2 * GiB, "max_total_bytes": 10 * GiB, "max_artifacts_per_item": 10,
     "concurrency": 3, "per_host_concurrency": 2, "connect_timeout": 15, "idle_timeout": 60,
-    "item_timeout": 600, "job_timeout": 4 * 3600, "retries": 3, "max_redirects": 5, "max_html_bytes": 10 * MiB,
+    "item_timeout": 600, "media_item_timeout": 2700, "job_timeout": 4 * 3600, "retries": 3, "max_redirects": 5,
+    "max_html_bytes": 10 * MiB,
 }
 CAPS = {
     "max_items": 1000, "max_bytes_per_file": 20 * GiB, "max_total_bytes": 100 * GiB, "max_artifacts_per_item": 50,
     "concurrency": 8, "per_host_concurrency": 4, "connect_timeout": 60, "idle_timeout": 300,
-    "item_timeout": 4 * 3600, "job_timeout": 24 * 3600, "retries": 5, "max_redirects": 10, "max_html_bytes": 50 * MiB,
+    "item_timeout": 4 * 3600, "media_item_timeout": 14400, "job_timeout": 24 * 3600, "retries": 5,
+    "max_redirects": 10, "max_html_bytes": 50 * MiB,
 }
 
 
@@ -99,3 +101,14 @@ def test_required_free_bytes_formula_of_fr3_7():
     assert limits.required_free_bytes(effective, 1) == 5 * GiB + 2 * GiB
     assert limits.required_free_bytes(effective, 3) == 5 * GiB + 6 * GiB
     assert limits.required_free_bytes(effective, 100) == 5 * GiB + 10 * GiB
+
+
+def test_media_item_timeout_is_its_own_key_with_a_longer_default():
+    effective, _ = limits.resolve({})
+    assert effective["media_item_timeout"] == 2700 and effective["item_timeout"] == 600
+    assert limits.resolve({"media_item_timeout": 14400})[0]["media_item_timeout"] == 14400
+    assert limits.resolve({"media_item_timeout": 0.5})[0]["media_item_timeout"] == 0.5  # a timeout may be fractional
+    with pytest.raises(ContractError) as info:
+        limits.resolve({"media_item_timeout": 14401})
+    assert (info.value.path, info.value.why) == ("$.limits.media_item_timeout", "out_of_range")
+    assert "media_item_timeout" in limits.TIMEOUT_KEYS
