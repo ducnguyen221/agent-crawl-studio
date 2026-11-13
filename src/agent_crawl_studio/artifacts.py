@@ -26,7 +26,7 @@ DECLARED_TYPE = re.compile(r"^[a-z0-9][a-z0-9.+-]*/[a-z0-9][a-z0-9.+-]*$")
 MAX_DECLARED = 100
 FINISHED_NAME = re.compile(r"^[0-9]{4}-[0-9a-f]{10}(-[0-9]+)?\.[a-z0-9]+$")  # what _place can have made
 PART_NAME = re.compile(r"^[0-9]{4}\.part$")
-ITEM_DIR_NAME = re.compile(r"^[0-9]{4}$")
+ITEM_DIR_NAME = re.compile(r"^[0-9]{4}(-[0-9]+)?$")
 REPARSE = 0x400
 BLOCK = 2 ** 20
 

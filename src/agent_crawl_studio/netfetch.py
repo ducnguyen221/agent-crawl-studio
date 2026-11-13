@@ -86,6 +86,14 @@ def classify(exc, body=False):
     return NetError("NETWORK_ERROR", "other")
 
 
+def _by_deadline(exc, timeout, capped):
+    """A socket that ran out of time on a wait the deadline had cut short (`capped` < `timeout`) ran out of the
+    deadline, not of its own idle wait: it is the deadline's timeout (the item's or the job's)."""
+    if timeout is None or capped < timeout:
+        return DeadlineTimeout("deadline")
+    return exc
+
+
 class DeadlineStream(httpcore.NetworkStream):
     """A network stream whose every read, write and TLS handshake is capped by the time left until the backend's
     absolute deadline: a server that sends one byte at a time cannot stretch a request past it."""
@@ -94,10 +102,18 @@ class DeadlineStream(httpcore.NetworkStream):
         self._stream, self._backend = stream, backend
 
     def read(self, max_bytes, timeout=None):
-        return self._stream.read(max_bytes, timeout=self._backend.remaining(timeout))
+        capped = self._backend.remaining(timeout)
+        try:
+            return self._stream.read(max_bytes, timeout=capped)
+        except httpcore.ReadTimeout as exc:
+            raise _by_deadline(exc, timeout, capped) from exc
 
     def write(self, buffer, timeout=None):
-        self._stream.write(buffer, timeout=self._backend.remaining(timeout))
+        capped = self._backend.remaining(timeout)
+        try:
+            self._stream.write(buffer, timeout=capped)
+        except httpcore.WriteTimeout as exc:
+            raise _by_deadline(exc, timeout, capped) from exc
 
     def close(self):
         self._stream.close()

@@ -16,6 +16,7 @@ from .winpath import PathBlocked
 MAX_MANIFEST_BYTES = 16 * 2 ** 20
 FILE_NAME = "manifest.json"
 ITEM_ID = re.compile(r"[0-9]{4}")
+MAX_ITEMS = 9999  # as many items as ITEM_ID can number: a manifest of more is not one of ours
 SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
@@ -61,7 +62,9 @@ def _is_text(value, pattern):
 
 def _check_shape(doc):
     """FR15.2: a finished result v1 whose ids, statuses, hashes and `retryable` flags can be trusted."""
-    if not isinstance(doc, dict) or schema.validate_result(doc):
+    if not isinstance(doc, dict) or not isinstance(doc.get("items"), list) or len(doc["items"]) > MAX_ITEMS:
+        raise _bad()  # before the validation, which adds a line of complaint for every missing key of every item
+    if schema.validate_result(doc):
         raise _bad()
     version = doc["schema_version"]
     if isinstance(version, bool) or version != schema.SCHEMA_VERSION or doc["kind"] != "result":
