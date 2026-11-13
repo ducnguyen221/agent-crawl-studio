@@ -335,9 +335,9 @@ def spawned():
 
 
 def recording_spawn(spawned):
-    def spawn(argv, env, cwd, out, err, holder=None):
+    def spawn(argv, env, cwd, out, err, holder=None, limits=None):
         mine = [] if holder is None else holder
-        result = jobobject.spawn_in_job(argv, env, cwd, out, err, holder=mine)
+        result = jobobject.spawn_in_job(argv, env, cwd, out, err, holder=mine, limits=limits)
         spawned.append(mine[0])
         return result
 
@@ -658,3 +658,75 @@ def test_size_watch_counts_what_is_written_outside_dl(tmp_path):
 def test_size_watch_caps_the_engine_output_files(tmp_path):
     outcome, _ = media(tmp_path, "sleep_then_ok", tree_usage=lambda root: (0, ytdlp.IO_CAP + 1))
     assert (outcome.status, outcome.code, outcome.retryable) == ("failed", "SIZE_LIMIT", False)
+
+
+# --------------------------------------------------- SPR-04 TK5: job limits for the engine, reparse points (FR22)
+
+def junction(link, target):
+    done = subprocess.run(["cmd", "/c", "mklink", "/J", link, str(target)], capture_output=True)
+    assert done.returncode == 0
+
+
+def test_the_engine_job_limits_the_process_count_and_not_the_memory():
+    assert ytdlp.MEDIA_JOB_LIMITS == jobobject.JobLimits(memory_bytes=None, active_processes=16)
+
+
+def test_the_engine_is_started_with_the_media_job_limits(tmp_path, spawned):
+    seen = []
+
+    def spy(argv, env, cwd, out, err, holder=None, limits=None):
+        seen.append(limits)
+        return recording_spawn(spawned)(argv, env, cwd, out, err, holder=holder, limits=limits)
+
+    outcome, _ = media(tmp_path, "ok_mp4", spawn=spy)
+    assert outcome.status == "succeeded" and seen == [ytdlp.MEDIA_JOB_LIMITS]
+
+
+def test_reparse_dir_tells_a_junction_from_a_folder_and_from_nothing(tmp_path):
+    (tmp_path / "plain").mkdir()
+    (tmp_path / "target").mkdir()
+    link = str(tmp_path / "link")
+    junction(link, tmp_path / "target")
+    try:
+        assert ytdlp.reparse_dir(link) is True
+        assert ytdlp.reparse_dir(str(tmp_path / "plain")) is False
+        assert ytdlp.reparse_dir(str(tmp_path / "missing")) is False
+    finally:
+        os.rmdir(link)
+
+
+def test_pick_output_and_scan_do_not_read_through_a_junction(tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "media.mp4").write_bytes(b"x" * 10)
+    link = str(tmp_path / "dl")
+    junction(link, outside)
+    try:
+        with pytest.raises(ytdlp.OutputError) as caught:
+            ytdlp.pick_output(link)
+        assert caught.value.reason == "not_plain"
+        assert ytdlp.scan_sizes(link) == []
+    finally:
+        os.rmdir(link)  # the link only, never `outside`
+
+
+def test_a_dl_replaced_by_a_junction_is_tool_failed_and_the_target_is_not_taken(tmp_path, spawned):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+
+    def swap(argv, env, cwd, out, err, holder=None, limits=None):
+        dl = os.path.join(os.path.dirname(cwd), "dl")
+        os.rmdir(dl)
+        junction(dl, outside)
+        return recording_spawn(spawned)(argv, env, cwd, out, err, holder=holder, limits=limits)
+
+    item = tmp_path / "item"
+    item.mkdir()
+    try:
+        outcome, dirs = media(item, "ok_mp4", spawn=swap)  # the engine writes media.mp4 into `dl`, i.e. `outside`
+        assert (outcome.status, outcome.code) == ("failed", "TOOL_FAILED") and outcome.file_path is None
+        assert (outside / "media.mp4").exists()  # the target is untouched and was not handed back
+    finally:
+        link = os.path.join(str(item), ".tmp", "0001", "dl")
+        if ytdlp.reparse_dir(link):
+            os.rmdir(link)

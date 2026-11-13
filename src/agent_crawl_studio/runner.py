@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 
 from . import artifacts, capabilities, egress, manifest, netfetch, router
 from . import config as config_mod
-from . import limits, outroot, retrying, schema, sniff, urlpolicy, ytdlp
+from . import jobobject, limits, outroot, retrying, schema, sniff, urlpolicy, ytdlp
 from .capabilities import WorkRootError
 from .errors import HINTS, ITEM_STATUS_FOR, JOB_EXIT, REASONS, error_object, item_error
 from .winpath import PathBlocked
@@ -333,6 +333,8 @@ class _Job:
             outcome = ytdlp.run_media_item(norm.url, item_id, dirs, limits, tools,
                                            budget=max(self.limits["max_total_bytes"] - self.used, 0), room=room,
                                            clock=self.clock, deps=deps, proxy=proxy)
+            if not jobobject.core_job_state() and "core_job_unavailable" not in self.warnings:
+                self.warnings.append("core_job_unavailable")  # the net behind the per-item job is missing (FR22.2)
             self.engine_log(item_id, dirs, token)
             return self.media_result(index, spec, norm, tools, outcome)
         except PathBlocked:
