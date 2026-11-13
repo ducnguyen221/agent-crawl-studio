@@ -432,3 +432,64 @@ def test_sweep_never_follows_a_junction_in_the_place_of_an_item_folder(art, job,
     writer.sweep()
     assert (secret / "keep.txt").read_text() == "mine"
     assert not os.path.lexists(str(job / ".tmp" / "0003")), "the link itself is taken away"
+
+
+def test_adopt_reads_a_file_bigger_than_one_block(art, job):
+    data = MP4 + b"z" * (2 ** 20 + 5)
+    artifact = adopt(art.ArtifactWriter(str(job)), media_src(job, data))
+    assert artifact["sha256"] == hashlib.sha256(data).hexdigest() and artifact["bytes"] == len(data)
+
+
+def test_adopt_refuses_a_handle_that_is_not_the_file_that_was_looked_at(art, job, monkeypatch):
+    src = media_src(job)
+    real = os.fstat
+
+    class Held:
+        st_nlink, st_size = 2, 1
+    monkeypatch.setattr(os, "fstat", lambda fd: Held())
+    with pytest.raises(PathBlocked):
+        adopt(art.ArtifactWriter(str(job)), src)
+    monkeypatch.setattr(os, "fstat", real)
+
+
+def test_adopt_a_source_that_cannot_be_opened_is_a_write_error(art, job, monkeypatch):
+    import builtins
+    src = media_src(job)
+    real = builtins.open
+
+    def refuse(path, *args, **kw):
+        if path == src:
+            raise PermissionError("busy")
+        return real(path, *args, **kw)
+    monkeypatch.setattr(builtins, "open", refuse)
+    with pytest.raises(art.ArtifactError):
+        adopt(art.ArtifactWriter(str(job)), src)
+
+
+def test_adopt_refuses_a_source_that_changed_between_reading_and_placing(art, job, monkeypatch):
+    src = media_src(job)
+    writer = art.ArtifactWriter(str(job))
+    original = writer._plain_source
+    calls = []
+
+    def changing(path):
+        info = original(path)
+        calls.append(1)
+        if len(calls) == 2:
+            return os.stat_result((info.st_mode, info.st_ino + 1, info.st_dev, info.st_nlink, 0, 0, info.st_size,
+                                   0, 0, 0))
+        return info
+    monkeypatch.setattr(writer, "_plain_source", changing)
+    with pytest.raises(PathBlocked):
+        adopt(writer, src)
+    assert os.listdir(job / "files") == []
+
+
+def test_adopt_a_file_whose_size_changed_in_the_rename_is_removed(art, job):
+    def short_rename(src, dst):
+        with open(dst, "wb") as out:
+            out.write(b"x")
+        os.remove(src)
+    with pytest.raises(art.ArtifactError) as err:
+        adopt(art.ArtifactWriter(str(job), rename=short_rename), media_src(job))
+    assert err.value.reason == "size" and os.listdir(job / "files") == []

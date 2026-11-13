@@ -3,6 +3,7 @@ the closed failure table, untrusted metadata, log redaction, and `run_media_item
 a Job Object, watches its folder and ends the whole tree on every way out. Nothing here opens a socket or imports
 `yt_dlp` (the package is only ever run as `python -m yt_dlp` in a child)."""
 
+import contextlib
 import json
 import math
 import os
@@ -150,6 +151,63 @@ def redact_log(text, secrets=()):
     if len(encoded) > MAX_LOG:
         text = encoded[-MAX_LOG:].decode("utf-8", "ignore")
     return text
+
+
+def _drop_link(path):
+    """Take away a link or junction itself (never what it points to)."""
+    for remove in (os.rmdir, os.remove):
+        try:
+            remove(path)
+            return
+        except OSError:
+            continue
+
+
+def _is_reparse(path):
+    try:
+        return bool(getattr(os.lstat(path), "st_file_attributes", 0) & REPARSE)
+    except OSError:
+        return False
+
+
+def _remove_tree(path):
+    try:
+        with os.scandir(path) as entries:
+            found = [(entry.path, entry.is_dir(follow_symlinks=False)) for entry in entries]
+    except OSError:
+        return
+    for child, is_dir in found:
+        if _is_reparse(child):
+            _drop_link(child)
+        elif is_dir:
+            _remove_tree(child)
+            with contextlib.suppress(OSError):
+                os.rmdir(child)
+        else:
+            with contextlib.suppress(OSError):
+                os.remove(child)
+
+
+def clear_item_dir(root, check):
+    """Remove `<job>/.tmp/<id>/` and all of it (FR10.5) without ever following a reparse point: a link in the
+    place of the folder, or inside it, is removed as a link and what it points to is left alone. `check(path)`
+    may veto (PathBlocked or any error: the folder is not touched). Whatever cannot be removed (a file still
+    open) is left; this never raises for that."""
+    try:
+        os.lstat(root)
+    except OSError:
+        return
+    if _is_reparse(root):
+        _drop_link(root)
+        return
+    if check is not None:
+        try:
+            check(root)
+        except Exception:  # noqa: BLE001 - PathBlocked or OSError: do not touch it
+            return
+    _remove_tree(root)
+    with contextlib.suppress(OSError):
+        os.rmdir(root)
 
 
 class OutputError(Exception):
