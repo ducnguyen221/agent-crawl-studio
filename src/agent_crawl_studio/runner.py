@@ -159,6 +159,7 @@ class RunLog:
         self.directory = os.path.join(job_dir, "logs")
         self.path = os.path.join(self.directory, "run.log")
         self._check, self._handle, self._dead = check, None, False
+        self.closers = []  # other files that end with the run (logs/egress.log)
         os.mkdir(self.directory)
         check(self.directory)
 
@@ -173,14 +174,19 @@ class RunLog:
             self._handle.flush()
         except PathBlocked:  # the file we just made sits somewhere it must not: take it away, stop logging
             self._dead = True
-            self.close()
+            self._close_file()
             with contextlib.suppress(OSError):
                 os.remove(self.path)
         except OSError:
             self._dead = True
-            self.close()
+            self._close_file()
 
     def close(self):
+        for closer in self.closers:
+            closer()
+        self._close_file()
+
+    def _close_file(self):
         if self._handle is not None:
             with contextlib.suppress(OSError):
                 self._handle.close()
@@ -648,9 +654,6 @@ def run(request, env, deps=None):
         return _run(request, env, deps, policy, moment_of, state)
     except KeyboardInterrupt:
         return _salvage(request, state, policy, moment_of)
-    finally:  # every way out, a Ctrl+C included
-        if state.get("job") is not None:
-            state["job"].close_egress_log()
 
 
 def _run(request, env, deps, policy, moment_of, state):
@@ -659,7 +662,7 @@ def _run(request, env, deps, policy, moment_of, state):
         return refusal
     job_dir, writer, mf, log = pieces
     job = _Job(request, deps, policy, writer, job_dir, _media_hosts(env), env, state.get("check"))
-    state["job"] = job
+    log.closers.append(job.close_egress_log)  # closed wherever the run log is: both ends have their Ctrl+C retries
     manifest_failed = False
     for index, spec in enumerate(request.urls, 1):
         if manifest_failed:  # nothing more is run, but the result still lists every item (SPEC FR3.5)
