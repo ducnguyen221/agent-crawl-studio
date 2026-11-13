@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "mode": "extract",
+  "urls": [
+    {"url": "https://www.rfc-editor.org/rfc/rfc9309.html"}
+  ]
+}
