@@ -69,7 +69,7 @@ REASONS = (
     "http_status", "truncated_body", "content_encoding_unsupported", "forbidden", "other",
 )
 
-HINT_CODES = ("unknown_key", "wrong_type", "out_of_range")
+HINT_CODES = ("unknown_key", "wrong_type", "out_of_range", "nothing_to_retry")
 
 # Fixed `hint` texts of item errors (never a piece of an engine's output).
 HINTS = {

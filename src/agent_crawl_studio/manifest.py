@@ -76,11 +76,13 @@ class ManifestWriter:
                     with contextlib.suppress(OSError):
                         os.remove(temp)
 
-    def start(self, job_id, started_at, limits_effective, total, warnings=()):
+    def start(self, job_id, started_at, limits_effective, total, warnings=(), retry_of=None):
         self._total = total
         self.doc = {"schema_version": 1, "kind": "result", "job_id": job_id, "status": None, "started_at": started_at,
                     "finished_at": None, "counts": None, "limits_effective": limits_effective, "items": [],
                     "warnings": list(warnings)}
+        if retry_of is not None:  # the job this one tries again (FR15.5)
+            self.doc["retry_of"] = retry_of
         self.doc["counts"] = self._counts()
         self._write()
 
