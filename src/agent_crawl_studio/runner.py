@@ -150,7 +150,7 @@ REASON_CODES = ("NETWORK_ERROR", "CONTENT_MISMATCH")
 EGRESS_LOG_LINES = 10000
 NETWORK_FACTOR = 2  # the network budget of an item / a job is this many times its size limit (FR23, DN19)
 EGRESS_LINE_MAX = 200
-HEX_TOKEN = re.compile(r"[0-9a-f]{64}(?=:x@)")  # the shape of a proxy token in front of `:x@` (FR24.1)
+HEX_TOKEN = re.compile(r"[0-9a-f]{64}(?=:x@)", re.IGNORECASE)  # the shape of a proxy token in front of `:x@` (FR24.1)
 MEDIA_DEPS = ("engine_prefix", "spawn", "kill_tree", "scan", "poll", "environ", "proxy_url")
 EXTRACT_DEPS = ("extract_python", "extract_worker", "extract_job_limits", "extract_poll", "extract_sleep", "spawn",
                 "kill_tree")
@@ -640,12 +640,23 @@ class _Job:
     def clear_item(self, item_root):
         """Take the item folder away. The files of a child that was just ended can stay locked for a few milliseconds
         (Windows lets go of the handles of a dead process a moment after it is gone), so a folder that is still there is
-        tried again, at most `CLEAR_TRIES` times; whatever cannot go is left, as `clear_item_dir` always does."""
-        for _ in range(CLEAR_TRIES):
+        tried again, at most `CLEAR_TRIES` times, `CLEAR_PAUSE` apart (through `self.sleep`). It stops at once when
+        `check` refuses the folder (waiting changes nothing). A folder that is still there after that is left, as
+        `clear_item_dir` always does, and the job says so (`item_dir_not_removed`): it holds the text the child
+        extracted."""
+        for attempt in range(CLEAR_TRIES):
             ytdlp.clear_item_dir(item_root, self.check)
             if not os.path.lexists(item_root):
                 return
-            time.sleep(CLEAR_PAUSE)
+            if self.check is not None:
+                try:
+                    self.check(item_root)
+                except Exception:  # noqa: BLE001 - a refusal of any kind: another try would be refused too
+                    break
+            if attempt + 1 < CLEAR_TRIES:
+                self.sleep(CLEAR_PAUSE)
+        if "item_dir_not_removed" not in self.warnings:
+            self.warnings.append("item_dir_not_removed")
 
     def extract_result(self, index, spec, outcome, html, result, dirs):
         """The item entry for what the child gave: an error code, or the two artifacts (the text first)."""

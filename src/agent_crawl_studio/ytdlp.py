@@ -155,7 +155,7 @@ def redact_log(text, secrets=()):
     `scheme://host/REDACTED` (no userinfo, path or query: signed links live there), and only the last 256 KiB stay."""
     for secret in secrets:
         if isinstance(secret, str) and secret:
-            text = text.replace(secret, "REDACTED")
+            text = re.sub(re.escape(secret), "REDACTED", text, flags=re.IGNORECASE)
     text = _ENCODED_URL.sub("REDACTED", text)
     text = _URL.sub(lambda found: "%s://%s/REDACTED" % (found.group(1), found.group(2)), text)
     text = _BARE_URL.sub(lambda found: "//%s/REDACTED" % found.group(1), text)

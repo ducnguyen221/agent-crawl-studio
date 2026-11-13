@@ -38,7 +38,7 @@ ALLOWED_CHARSETS = frozenset(
     + ["windows-%d" % number for number in range(1250, 1259)]
     + ["iso-8859-%d" % number for number in range(1, 17)])  # no utf-7: it can hide markup from a filter
 
-_CT_CHARSET = re.compile(r"charset\s*=\s*[\"']?\s*([^\s\"';,]+)", re.IGNORECASE)
+_CT_CHARSET = re.compile(r"charset\s*=\s*[\"']?([^\s\"';,]+)", re.IGNORECASE)
 _META_TAG = re.compile(rb"<meta\b[^>]*>", re.IGNORECASE)
 _META_CHARSET = re.compile(rb"charset\s*=\s*[\"']?\s*([^\s\"';/>]+)", re.IGNORECASE)
 _META_WINDOW = 1024
@@ -106,6 +106,7 @@ _INVISIBLE_EXTRA = (
 _LINE_MAX = 2000
 _MARK_RUN = 8  # more combining marks in a row are cut: the canonical ordering step of NFC is quadratic on a long run
 _LABEL = "[crawl-studio"
+_LABEL_ANYWHERE = re.compile(re.escape(_LABEL), re.IGNORECASE)
 _tables = {}
 
 
@@ -114,7 +115,8 @@ def _scan():
     runs of combining marks. Built on first use, about 0.1 s."""
     if _tables:
         return _tables
-    removal, marks = {}, []
+    built, removal, marks = {}, {}, []  # `built` is filled first and published with one call: an interrupt in the
+    # middle leaves `_tables` empty, never half-filled
     for cp in list(range(0, 0x32400)) + list(range(0xE0000, 0xE0200)):
         category = unicodedata.category(chr(cp))
         if category in ("Cf", "Cs", "Zl", "Zp") or (category == "Cc" and cp not in (0x09, 0x0A)):
@@ -134,9 +136,10 @@ def _scan():
             start = last = cp
     spans.append((start, last))
     klass = "".join("\\U%08x-\\U%08x" % span for span in spans)
-    _tables["removal"] = removal
-    _tables["marks"] = re.compile("[%s]{%d,}" % (klass, _MARK_RUN + 1))
-    _tables["lead"] = ">" + "".join(ch for ch in map(chr, range(0x10000)) if ch.isspace())
+    built["removal"] = removal
+    built["marks"] = re.compile("[%s]{%d,}" % (klass, _MARK_RUN + 1))
+    built["lead"] = ">" + "".join(ch for ch in map(chr, range(0x10000)) if ch.isspace())
+    _tables.update(built)
     return _tables
 
 
@@ -174,9 +177,9 @@ def _escape_label(line, lead):
 
 def clean_text(text):
     """Markdown from the engine made safe (FR20.3, FR20.8): invisible characters out, NFC, `<` written as `&lt;`,
-    no link or image syntax, lines folded at 2 000 characters, a line that would open with the marker of the fixed
-    first line gets a backslash before `[`, at most two blank lines in a row. Linear in the length of `text`;
-    the caller bounds `text` at 2 x `max_extract_chars` first."""
+    no link or image syntax, lines folded at 2 000 characters, the marker of the fixed first line (anywhere in a
+    line, any case) gets a backslash before its `[`, at most two blank lines in a row. Linear in the length of
+    `text`; the caller bounds `text` at 2 x `max_extract_chars` first."""
     tables = _scan()
     text = strip_invisible(text)
     text = tables["marks"].sub(lambda found: found.group()[:_MARK_RUN], text)
@@ -190,7 +193,9 @@ def clean_text(text):
             continue
         blank = 0
         line = _strip_links(line) if ("](" in line or "![" in line) else line
-        for start in range(0, len(line), _LINE_MAX):  # fold first: a folded piece can open with the marker
+        if "[" in line:  # the marker anywhere in the line, any case (a code block keeps `> [crawl-studio ...`)
+            line = _LABEL_ANYWHERE.sub(lambda found: "\\" + found.group(), line)
+        for start in range(0, len(line), _LINE_MAX):  # then fold: a folded piece can open with the marker
             piece = line[start:start + _LINE_MAX]
             out.append(_escape_label(piece, lead) if "[" in piece else piece)
     return "\n".join(out).strip("\n")
@@ -422,10 +427,11 @@ def _run_child(argv, env, item_dir, paths, limits, deps, holder, streams, clock,
         return _tool_failed()
     stop_at = min(clock() + limits["extract_timeout"], deadline)
     ended = _wait(proc, clock, stop_at, deps.get("extract_poll", POLL), deps.get("extract_sleep", time.sleep))
+    kind = "job" if stop_at >= deadline else "extract"  # read before the kill: it can take seconds
     clean = kill(job, proc)  # before anything is read: the tree is dead first
     warnings = [] if clean else ["process_tree_not_empty"]
     if not ended:
-        return _fail("TIMEOUT", warnings=warnings, timeout_kind="job" if clock() >= deadline else "extract")
+        return _fail("TIMEOUT", warnings=warnings, timeout_kind=kind)
     if not clean:
         return _tool_failed(warnings=warnings)
     return _judge(proc, job, paths[0], paths[1], limits, check)
