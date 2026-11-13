@@ -44,14 +44,16 @@ def _arg(argv, name):
     return argv[argv.index(name) + 1]
 
 
-def _through_proxy(argv, host):
-    """CONNECT `host`:443 through the `--proxy` of argv; (status, bytes read from the tunnel until it closes)."""
+def _through_proxy(argv, host, plain=False):
+    """CONNECT `host`:443 through the `--proxy` of argv (or, `plain`, GET http://host/ as after a redirect to http);
+    (status, bytes read from the tunnel until it closes)."""
     proxy = _arg(argv, "--proxy")
     user, _, where = proxy[len("http://"):].partition("@")
     name, _, port = where.partition(":")
     auth = base64.b64encode(user.encode()).decode()
     conn = socket.create_connection((name, int(port)), timeout=10)
-    conn.sendall(("CONNECT %s:443 HTTP/1.1\r\n" % (host,) + "Host: %s:443\r\n" % (host,) +
+    first = "GET http://%s/ HTTP/1.1" % (host,) if plain else "CONNECT %s:443 HTTP/1.1" % (host,)
+    conn.sendall((first + "\r\n" + "Host: %s:443\r\n" % (host,) +
                   "Proxy-Authorization: Basic %s\r\n\r\n" % (auth,)).encode())
     buf = b""
     while b"\r\n\r\n" not in buf:
@@ -113,6 +115,10 @@ def main(argv):
     elif scenario == "fail_dns":
         _err("ERROR: [youtube] x: Unable to download webpage: getaddrinfo failed")
         return 1
+    elif scenario == "fail_tunnel_502":  # a name that does not resolve, as yt-dlp sees it through the proxy
+        _err("ERROR: [youtube] x: Unable to download webpage: ProxyError('Unable to connect to proxy', "
+             "OSError('Tunnel connection failed: 502 Bad Gateway'))")
+        return 1
     elif scenario == "fail_mixed":
         _err("ERROR: [youtube] x: HTTP Error 403: Forbidden")
         _err("ERROR: [youtube] x: HTTP Error 429: Too Many Requests")
@@ -148,11 +154,12 @@ def main(argv):
     elif scenario == "json_evil":
         _write(dl, "media.mp4", MP4)
         _emit({"title": "a\x1b[31m‮b\n" + "x" * 500, "uploader": "u\r\nv", "duration": 19, "extractor_key": "Youtube"})
-    elif scenario in ("via_proxy", "via_proxy_then_hang", "redirect_internal"):
-        host = "internal.example.com" if scenario == "redirect_internal" else _host_of(argv)
-        status, total = _through_proxy(argv, host)
-        if status != 200:
-            _err("ERROR: [youtube] x: proxy answered %d for %s via %s" % (status, host, _arg(argv, "--proxy")))
+    elif scenario in ("via_proxy", "via_proxy_then_hang", "redirect_internal", "redirect_http"):
+        host = "internal.example.com" if scenario.startswith("redirect") else _host_of(argv)
+        status, total = _through_proxy(argv, host, plain=scenario == "redirect_http")
+        if status != 200:  # what yt-dlp prints when its proxy refuses a CONNECT: never a lookup message
+            _err("ERROR: [youtube] x: Unable to download webpage: ProxyError('Unable to connect to proxy', "
+                 "OSError('Tunnel connection failed: %d Bad Gateway')) via %s" % (status, _arg(argv, "--proxy")))
             return 1
         if scenario == "via_proxy_then_hang":
             time.sleep(60)

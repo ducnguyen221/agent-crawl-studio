@@ -6,9 +6,11 @@ import os
 import re
 import socket
 
+import httpcore
 import pytest
 
-from agent_crawl_studio import artifacts, egress
+from agent_crawl_studio import artifacts, egress, runner
+from agent_crawl_studio.errors import HINTS
 from agent_crawl_studio.urlpolicy import Policy
 
 from test_egress import PUBLIC, _Origin, _Rig
@@ -127,3 +129,97 @@ def test_a_job_without_a_media_item_opens_no_port(world, server, rig):
     result, code = go(world, server, [server.url("/ok")], deps=media_deps(egress=lambda *a, **k: made.append(1), policy=policy_for(server)),
                       mode="auto")
     assert code == 0 and made == []
+
+
+def _item(result):
+    return result["items"][0]
+
+
+def test_a_name_that_does_not_resolve_is_a_retryable_dns_failure(world, server, rig):  # RF1
+    rig.names = {}
+    result, code = run(world, server, rig, [YT], "via_proxy")
+    error = _item(result)["error"]
+    assert error["code"] == "NETWORK_ERROR" and error["reason"] == "dns_failed" and error["retryable"] is True
+    assert _item(result)["status"] == "failed"
+
+
+@pytest.mark.parametrize("fail,code,retryable", [
+    (httpcore.ConnectError("refused"), "NETWORK_ERROR", True), (httpcore.ConnectTimeout("slow"), "TIMEOUT", True)])
+def test_a_connect_that_fails_or_times_out_is_retryable(world, server, rig, fail, code, retryable):  # RF1
+    rig.fail = fail
+    result, _ = run(world, server, rig, [YT], "via_proxy")
+    error = _item(result)["error"]
+    assert error["code"] == code and error.get("retryable", retryable) is retryable and _item(result)["status"] == "failed"
+
+
+def test_a_refusal_still_comes_before_a_failed_connect(world, server, rig):  # FR13.10 order
+    rig.names = dict(NAMES, **{"www.youtube.com": "10.0.0.1"})
+    result, _ = run(world, server, rig, [YT], "via_proxy")
+    assert _item(result)["error"]["code"] == "URL_BLOCKED"
+
+
+def test_a_redirect_to_plain_http_is_a_blocked_redirect(world, server, rig):  # RF7
+    result, _ = run(world, server, rig, [YT], "redirect_http")
+    assert _item(result)["status"] == "blocked" and _item(result)["error"]["code"] == "REDIRECT_BLOCKED"
+    assert rig.pinned == []
+
+
+class _NoPort:
+    over_cap = type("E", (), {"is_set": staticmethod(lambda: False)})()
+    denied = []
+    stopped = 0
+
+    def start(self):
+        raise OSError(10013, "denied by a firewall")
+
+    def stop(self, timeout=2.0):
+        _NoPort.stopped += 1
+
+
+def test_a_proxy_that_cannot_open_its_port_is_a_tool_failure_not_a_disk_failure(world, server, rig):  # RF5
+    spawned = []
+    deps = media_deps("via_proxy", spawned=spawned, egress=lambda *a, **k: _NoPort())
+    result, code = go(world, server, [YT], deps=deps, mode="media")
+    error = _item(result)["error"]
+    assert error["code"] == "TOOL_FAILED" and error["hint"] == HINTS["proxy_unavailable"]
+    assert spawned == [] and _NoPort.stopped == 1 and tmp_dirs(world, result) == []
+
+
+def _counting_open(monkeypatch, opened):
+    real = open
+
+    def counting(path, mode="r", *args, **kwargs):
+        handle = real(path, mode, *args, **kwargs)
+        if str(path).endswith("egress.log"):
+            opened.append((mode, handle))
+        return handle
+
+    monkeypatch.setattr(runner, "open", counting, raising=False)
+
+
+def test_the_egress_log_is_created_once_exclusively_and_closed(world, server, rig, monkeypatch):  # RF6
+    opened = []
+    _counting_open(monkeypatch, opened)
+    result, _ = run(world, server, rig, [YT, YT], "via_proxy")
+    assert [mode for mode, _ in opened] == ["x"] and opened[0][1].closed
+    with open(os.path.join(job_dir_of(world, result), "logs", "egress.log"), encoding="utf-8") as handle:
+        assert len(handle.read().splitlines()) == 2
+
+
+def test_the_egress_log_is_closed_on_a_ctrl_c_too(world, server, rig, monkeypatch):  # RF6
+    opened = []
+    _counting_open(monkeypatch, opened)
+
+    def boom(self, *args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(artifacts.ArtifactWriter, "adopt", boom)
+    _, code = run(world, server, rig, [YT], "via_proxy")
+    assert code == 130 and len(opened) == 1 and opened[0][1].closed
+
+
+def test_the_egress_log_keeps_its_line_cap(world, server, rig, monkeypatch):  # RF6
+    monkeypatch.setattr(runner, "EGRESS_LOG_LINES", 1)
+    result, _ = run(world, server, rig, [YT, YT], "via_proxy")
+    with open(os.path.join(job_dir_of(world, result), "logs", "egress.log"), encoding="utf-8") as handle:
+        assert len(handle.read().splitlines()) == 1

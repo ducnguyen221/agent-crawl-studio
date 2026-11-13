@@ -62,9 +62,24 @@ def test_a_missing_tool_is_blocked_env(tmp_path):
     assert rc == 1 and obj["status"] == "BLOCKED_ENV" and obj["error"]["code"] == "DEPENDENCY_MISSING"
 
 
+class Unresolved:
+    """A stand-in egress proxy that let the CONNECT through but could not resolve the name (RF1): the engine only
+    saw `502 Bad Gateway`, the proxy's own record says why."""
+    over_cap = type("E", (), {"is_set": staticmethod(lambda: False)})()
+    denied = []
+    failures = [("www.youtube.com", "dns_failed")]
+    url = "http://%s:x@127.0.0.1:5" % ("ab" * 32)
+
+    def start(self):
+        return self.url
+
+    def stop(self, timeout=2.0):
+        pass
+
+
 def test_a_name_that_does_not_resolve_is_blocked_env(tmp_path):
-    rc, obj = go(tmp_path, deps=deps_for("fail_dns"))
-    assert rc == 1 and obj["status"] == "BLOCKED_ENV"
+    rc, obj = go(tmp_path, deps=deps_for("fail_tunnel_502", egress=lambda *a, **k: Unresolved()))
+    assert rc == 1 and obj["status"] == "BLOCKED_ENV" and obj["error"]["code"] == "NETWORK_ERROR"
 
 
 class Refusing:
