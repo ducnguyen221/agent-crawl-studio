@@ -20,7 +20,7 @@ TABLE = {
     "URL_BLOCKED": (False, "blocked", None),
     "REDIRECT_BLOCKED": (False, "blocked", None),
     "OUTPUT_PATH_BLOCKED": (False, "blocked", 2),
-    "DEPENDENCY_MISSING": (False, None, 2),
+    "DEPENDENCY_MISSING": (False, "failed", 2),
     "AUTH_REQUIRED": (False, "failed", None),
     "RATE_LIMITED": (True, "failed", None),
     "NETWORK_ERROR": (True, "failed", None),
@@ -203,3 +203,12 @@ def test_network_status_three_states():
     assert network_status(False, False) == "NOT_RUN"
     assert network_status(True, False) == "BLOCKED_ENV"
     assert network_status(True, True) == "RUN"
+
+
+def test_dependency_missing_is_also_an_item_status_and_has_fixed_hints():
+    assert errors.ITEM_STATUS_FOR["DEPENDENCY_MISSING"] == "failed"
+    assert errors.HINTS == {
+        "tools_missing": "install ffmpeg, node and the core venv; nothing was installed",
+        "job_object_unavailable": "the process could not be contained; it was stopped",
+    }
+    assert all(text.isascii() for text in errors.HINTS.values())
