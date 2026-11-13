@@ -1,0 +1,49 @@
+{
+ "schema_version": 1,
+ "kind": "plan",
+ "valid": true,
+ "network_checked": false,
+ "output": {
+  "decision": "allow",
+  "root": "<WORK>",
+  "parent": "<WORK>\\jobs",
+  "job_dir_template": "<WORK>\\jobs\\<job_id>"
+ },
+ "limits_effective": {
+  "max_items": 100,
+  "max_bytes_per_file": 2147483648,
+  "max_total_bytes": 10737418240,
+  "max_artifacts_per_item": 10,
+  "concurrency": 3,
+  "per_host_concurrency": 2,
+  "connect_timeout": 15,
+  "idle_timeout": 60,
+  "item_timeout": 600,
+  "media_item_timeout": 2700,
+  "job_timeout": 14400,
+  "retries": 3,
+  "max_redirects": 5,
+  "max_html_bytes": 10485760
+ },
+ "items": [
+  {
+   "id": "0001",
+   "url_redacted": "http://pinned.example:<PORT>/html?size=REDACTED",
+   "url_sha256": "<URL_SHA256>",
+   "expect": "auto",
+   "adapter": "direct-http",
+   "decision": "allow"
+  },
+  {
+   "id": "0002",
+   "url_redacted": "http://pinned.example:<PORT>/file?size=REDACTED",
+   "url_sha256": "<URL_SHA256>",
+   "expect": "auto",
+   "adapter": "direct-http",
+   "decision": "allow"
+  }
+ ],
+ "warnings": [
+  "concurrency_not_applied"
+ ]
+}
