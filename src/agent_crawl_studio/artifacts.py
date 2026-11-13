@@ -9,12 +9,14 @@ import gc
 import hashlib
 import os
 import re
+import stat
 import time
 import unicodedata
 
 import httpx
 
-from . import sniff
+from . import sniff, ytdlp
+from .winpath import PathBlocked
 
 RETRY_DELAYS = (0.05, 0.1, 0.2, 0.4)  # five tries, the pause doubles
 SHARING_VIOLATIONS = (5, 32)  # WinError: access denied / sharing violation (an anti-virus scanner, an indexer)
@@ -24,6 +26,9 @@ DECLARED_TYPE = re.compile(r"^[a-z0-9][a-z0-9.+-]*/[a-z0-9][a-z0-9.+-]*$")
 MAX_DECLARED = 100
 FINISHED_NAME = re.compile(r"^[0-9]{4}-[0-9a-f]{10}(-[0-9]+)?\.[a-z0-9]+$")  # what _place can have made
 PART_NAME = re.compile(r"^[0-9]{4}\.part$")
+ITEM_DIR_NAME = re.compile(r"^[0-9]{4}$")
+REPARSE = 0x400
+BLOCK = 2 ** 20
 
 
 class ArtifactError(Exception):
@@ -151,6 +156,12 @@ class ArtifactWriter:
     def sweep(self):
         """Remove every .part of this job (after an interrupt nobody else can be writing them)."""
         self._remove_matching(self.tmp_dir, PART_NAME.match)
+        if not self._folder_ok(self.tmp_dir):
+            return
+        with contextlib.suppress(OSError):
+            for name in os.listdir(self.tmp_dir):
+                if ITEM_DIR_NAME.match(name):
+                    ytdlp.clear_item_dir(os.path.join(self.tmp_dir, name), self._check)
 
     def abort(self, part):
         part.close()
@@ -210,3 +221,89 @@ class ArtifactWriter:
         artifact.update(engine="httpx", engine_version=httpx.__version__, source_url_redacted=source_url_redacted,
                         warnings=warnings)
         return artifact
+
+    @staticmethod
+    def _plain_source(path):
+        """lstat of a source that is a plain file with one link and no reparse point; else PathBlocked."""
+        try:
+            info = os.lstat(path)
+        except OSError:
+            raise ArtifactError("part") from None
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                or getattr(info, "st_file_attributes", 0) & REPARSE):
+            raise PathBlocked("not_plain")
+        return info
+
+    def _read_source(self, src_path, max_bytes):
+        """(size, sha256 hex, head, lstat) of the source, read through one handle; ArtifactError("size") when it
+        is bigger than `max_bytes`."""
+        before = self._plain_source(src_path)
+        try:
+            with open(src_path, "rb") as handle:
+                held = os.fstat(handle.fileno())
+                if held.st_nlink != 1 or held.st_size != before.st_size:
+                    raise PathBlocked("not_plain")
+                if held.st_size > max_bytes:
+                    raise ArtifactError("size")
+                sha, head, total = hashlib.sha256(), b"", 0
+                while True:
+                    block = handle.read(BLOCK)
+                    if not block:
+                        break
+                    if not head:
+                        head = bytes(block[:HEAD_KEPT])
+                    sha.update(block)
+                    total += len(block)
+        except OSError:
+            raise ArtifactError("part") from None
+        return total, sha.hexdigest(), head, before
+
+    def adopt(self, item_id, src_path, *, source_url_redacted, host_url, engine, engine_version, max_bytes,
+              allowed_mimes):
+        """Take a finished file that another tool wrote (yt-dlp, with its tree already dead) into files/. The
+        source is read once through one handle (no reparse point, one link), hashed, its type taken from its
+        bytes; a type outside `allowed_mimes` or a size over `max_bytes` removes the source and raises
+        ArtifactError("mime"/"size"). Returns the artifact record."""
+        try:
+            total, digest, head, before = self._read_source(src_path, max_bytes)
+        except ArtifactError as exc:
+            if exc.reason == "size":
+                with contextlib.suppress(OSError):
+                    os.remove(src_path)
+            raise
+        mime = sniff.detect(head)
+        if mime not in allowed_mimes:
+            with contextlib.suppress(OSError):
+                os.remove(src_path)
+            raise ArtifactError("mime")
+        after = self._plain_source(src_path)  # swapped for a link or another file since it was read: refuse
+        if (after.st_ino, after.st_size) != (before.st_ino, before.st_size):
+            raise PathBlocked("changed")
+        name, target = self._place(_Source(item_id, src_path, total, digest), sniff.extension_for(mime))
+        warnings = []
+        try:
+            if os.path.getsize(target) != total:
+                raise ArtifactError("size")
+            if self._check is not None:
+                self._check(target)
+            try:
+                self._motw(target, host_url)
+            except OSError:
+                warnings.append("motw_not_set")
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.remove(target)
+            raise
+        return {"path": "files/" + name, "bytes": total, "sha256": digest, "mime": mime, "engine": engine,
+                "engine_version": engine_version, "source_url_redacted": source_url_redacted, "warnings": warnings}
+
+
+class _Source:
+    """What `ArtifactWriter._place` needs of a file that is already on disk."""
+
+    def __init__(self, item_id, path, size, digest):
+        self.item_id, self.path, self.bytes, self._digest = item_id, path, size, digest
+        self.placed = None
+
+    def sha256(self):
+        return self._digest

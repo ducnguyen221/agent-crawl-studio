@@ -586,3 +586,11 @@ def test_clear_item_dir_survives_a_file_that_cannot_be_removed(tmp_path):
         ytdlp.clear_item_dir(dirs.root, None)  # a file in use: no exception
     finally:
         handle.close()
+
+
+def test_the_folder_helpers_ignore_what_is_not_there(tmp_path):
+    gone = str(tmp_path / "gone")
+    ytdlp._drop_link(gone)
+    assert ytdlp._is_reparse(gone) is False
+    ytdlp._remove_tree(gone)
+    assert not os.path.exists(gone)
