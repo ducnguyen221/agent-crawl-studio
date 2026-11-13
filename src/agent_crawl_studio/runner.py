@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 
 from . import artifacts, capabilities, egress, extract, manifest, netfetch, router
 from . import config as config_mod
-from . import jobobject, limits, outroot, retrying, schema, sniff, urlpolicy, ytdlp
+from . import envbuild, jobobject, limits, outroot, retrying, schema, sniff, urlpolicy, ytdlp
 from .capabilities import WorkRootError
 from .errors import HINTS, ITEM_STATUS_FOR, JOB_EXIT, REASONS, error_object, item_error
 from .winpath import PathBlocked
@@ -152,6 +152,11 @@ NETWORK_FACTOR = 2  # the network budget of an item / a job is this many times i
 EGRESS_LINE_MAX = 200
 HEX_TOKEN = re.compile(r"[0-9a-f]{64}(?=:x@)")  # the shape of a proxy token in front of `:x@` (FR24.1)
 MEDIA_DEPS = ("engine_prefix", "spawn", "kill_tree", "scan", "poll", "environ", "proxy_url")
+EXTRACT_DEPS = ("extract_python", "extract_worker", "extract_job_limits", "extract_poll", "extract_sleep", "spawn",
+                "kill_tree")
+MARKDOWN_MIMES = frozenset({"text/markdown"})  # the one type the text artifact may have (FR21.2)
+CLEAR_TRIES = 10  # an item folder of an extraction child that will not go is tried again, 50 ms apart
+CLEAR_PAUSE = 0.05
 
 
 def _stamp(moment):
@@ -224,7 +229,7 @@ def _entry(policy, index, spec, code=None, outcome=None, artifact=None, skipped=
         entry["adapter"] = adapter or "direct-http"
         entry["artifacts"] = [artifact]
     if outcome is not None:
-        entry["adapter"] = "direct-http"
+        entry["adapter"] = adapter or "direct-http"  # `extract` downloads its page like the direct adapter
         raw = {name: outcome.headers_clean.get(header) for header, name in UNTRUSTED_HEADERS}
         raw["final_url_redacted"] = outcome.final_url_redacted
         entry["untrusted"] = manifest.clean_untrusted(raw)
@@ -259,6 +264,9 @@ class _Job:
         self.egress_out = None  # logs/egress.log: created exclusively once, kept open, closed when the run ends
         self.egress_dead = False
         self.media_deps = {key: deps[key] for key in MEDIA_DEPS if key in deps}
+        self.extract_deps = {key: deps[key] for key in EXTRACT_DEPS if key in deps}
+        self.environ = deps["environ"] if "environ" in deps else envbuild.process_env()  # the child's is built from it
+        self.engine = []  # the version of the extract engine, looked up once, when the first extract item needs it
         self.tools = []  # looked up once, when the first media item needs it
         self.warnings = []  # job-level warnings raised by items (`process_tree_not_empty`)
         self.limits = request.limits_effective
@@ -336,10 +344,24 @@ class _Job:
         except urlpolicy.Blocked:
             return self.entry(index, spec, "URL_BLOCKED")
         if self.net_room() == 0:  # FR23.2: the job's network budget is spent: this item opens no connection
-            return self.entry(index, spec, "SIZE_LIMIT", adapter=router.ADAPTER_MEDIA if adapter == router.ADAPTER_MEDIA else None)
+            return self.entry(index, spec, "SIZE_LIMIT", adapter=None if adapter == router.ADAPTER_DIRECT else adapter)
         if adapter == router.ADAPTER_MEDIA:
             return self.media(index, spec, norm)
+        if adapter == router.ADAPTER_EXTRACT:
+            return self.extract(index, spec)
         return self.download(index, spec)
+
+    def extract(self, index, spec):
+        """One page of the `extract` mode (FR18.1): the engine must be there, then the page is downloaded the direct way
+        and read as text; the two artifacts count for `max_artifacts_per_item` (FR21.4)."""
+        adapter = router.ADAPTER_EXTRACT
+        if not self.engine:
+            self.engine.append(extract.find_engine(self.version_of))
+        if self.engine[0] is None:
+            return self.entry(index, spec, "DEPENDENCY_MISSING", adapter=adapter, hint=HINTS["extract_engine_missing"])
+        if self.limits["max_artifacts_per_item"] < extract.ARTIFACTS_PER_ITEM:
+            return self.entry(index, spec, "SIZE_LIMIT", adapter=adapter)
+        return self.download(index, spec, adapter)
 
     def media(self, index, spec, norm):
         if not self.tools:
@@ -373,8 +395,7 @@ class _Job:
             outcome = ytdlp.run_media_item(norm.url, item_id, dirs, limits, tools,
                                            budget=max(self.limits["max_total_bytes"] - self.used, 0), room=room,
                                            clock=self.clock, deps=deps, proxy=proxy)
-            if not jobobject.core_job_state() and "core_job_unavailable" not in self.warnings:
-                self.warnings.append("core_job_unavailable")  # the net behind the per-item job is missing (FR22.2)
+            self.note_core_job()
             self.engine_log(item_id, dirs, token)
             return self.media_result(index, spec, norm, tools, outcome)
         except PathBlocked:
@@ -434,20 +455,38 @@ class _Job:
             with contextlib.suppress(OSError):
                 out.close()
 
+    def note_core_job(self):
+        """The net behind the per-item job is missing: a job warning, once (FR22.2)."""
+        if not jobobject.core_job_state() and "core_job_unavailable" not in self.warnings:
+            self.warnings.append("core_job_unavailable")
+
+    def note_tree(self, stop):
+        """A Ctrl+C that says the tree of a child could not be emptied: a job warning, once (FR12.2)."""
+        if getattr(stop, "process_tree_not_empty", False) and "process_tree_not_empty" not in self.warnings:
+            self.warnings.append("process_tree_not_empty")
+
     def engine_log(self, item_id, dirs, token=""):
         """logs/<id>-ytdlp.log: the tail of the engine's stderr, URLs made safe, every line cleaned (FR9.3)."""
         try:
-            text = ytdlp.redact_log(ytdlp.read_tail(os.path.join(dirs.io, "stderr.bin")), secrets=(token,))
-            lines = [manifest.untrusted_text(line) for line in text.splitlines()]
+            text = ytdlp.read_tail(os.path.join(dirs.io, "stderr.bin"))
+        except OSError:
+            return  # a log that cannot be read never fails the item
+        self.item_log(item_id, "ytdlp", text, (token,))
+
+    def item_log(self, item_id, tag, text, secrets=()):
+        """logs/<id>-<tag>.log (`<id>-<tag>-<n>.log` for the n-th attempt): `text` with every URL made safe and every
+        line cleaned; nothing is written for an empty text, and a log that cannot be written never fails the item."""
+        try:
+            lines = [manifest.untrusted_text(line) for line in ytdlp.redact_log(text, secrets=secrets).splitlines()]
             if any(lines):
                 logs = os.path.join(self.job_dir, "logs")
                 if self.check is not None:
                     self.check(logs)  # a junction in the place of logs/ would send the log out of the job
-                name = "%s-ytdlp.log" % item_id if self.attempt == 1 else "%s-ytdlp-%d.log" % (item_id, self.attempt)
+                name = "%s-%s.log" % (item_id, tag) if self.attempt == 1 else "%s-%s-%d.log" % (item_id, tag, self.attempt)
                 with open(os.path.join(logs, name), "x", encoding="utf-8", newline="\n") as out:
                     out.write("\n".join(lines) + "\n")
         except (OSError, PathBlocked):
-            pass  # a log that cannot be written never fails the item
+            pass
 
     def media_result(self, index, spec, norm, tools, outcome):
         for warning in outcome.warnings:
@@ -480,18 +519,20 @@ class _Job:
         self.used += artifact["bytes"]
         return self.entry(index, spec, None, artifact=artifact, adapter=adapter, untrusted=outcome.untrusted)
 
-    def download(self, index, spec):
+    def download(self, index, spec, adapter=None):
+        """One page or file the direct way; `adapter` is `extract` when the page is to be read as text afterwards."""
         part = None
         try:
             try:
                 part = self.writer.open("%04d" % index)
             except artifacts.ArtifactError:
-                return self.entry(index, spec, "OUTPUT_WRITE_FAILED")
+                return self.entry(index, spec, "OUTPUT_WRITE_FAILED", adapter=adapter)
             except PathBlocked:
                 self.stop_code = "OUTPUT_PATH_BLOCKED"
-                return self.entry(index, spec, "OUTPUT_PATH_BLOCKED")
-            return self.fetch_and_place(index, spec, part)
-        except KeyboardInterrupt:  # anywhere from the opening of the part to the end of the item
+                return self.entry(index, spec, "OUTPUT_PATH_BLOCKED", adapter=adapter)
+            return self.fetch_and_place(index, spec, part, adapter)
+        except KeyboardInterrupt as stop:  # anywhere from the opening of the part to the end of the item
+            self.note_tree(stop)
             if part is not None:
                 self.writer.abort(part)
                 if part.placed is not None:  # the file was already placed: it must not outlive the cancelled item
@@ -501,15 +542,16 @@ class _Job:
             self.cancelled = True
             return self.entry(index, spec, "CANCELLED")
 
-    def fail(self, index, spec, part, code, outcome=None):
+    def fail(self, index, spec, part, code, outcome=None, adapter=None):
         self.writer.abort(part)
-        return self.entry(index, spec, code, outcome)
+        return self.entry(index, spec, code, outcome, adapter=adapter)
 
-    def fetch_and_place(self, index, spec, part):
+    def fetch_and_place(self, index, spec, part, adapter=None):
         try:
             room = max(self.free_bytes_of(self.job_dir) - FREE_RESERVE, 0)
         except Exception as exc:  # noqa: BLE001 - a probe that fails fails this item, not the job
-            return self.fail(index, spec, part, "OUTPUT_WRITE_FAILED" if isinstance(exc, OSError) else "TOOL_FAILED")
+            return self.fail(index, spec, part, "OUTPUT_WRITE_FAILED" if isinstance(exc, OSError) else "TOOL_FAILED",
+                             adapter=adapter)
 
         counted = [0]
 
@@ -520,31 +562,126 @@ class _Job:
             self.count_net(len(chunk))  # counted as it comes, so that a Ctrl+C keeps what was received (FR23.3)
             counted[0] += len(chunk)
 
+        limits = extract.page_limits(self.limits) if adapter == router.ADAPTER_EXTRACT else self.limits
         try:
-            outcome = self.fetch(spec.url, spec.expect, self.limits, sink, self.policy,
+            outcome = self.fetch(spec.url, spec.expect, limits, sink, self.policy,
                                  total_remaining=max(self.limits["max_total_bytes"] - self.used, 0),
                                  clock=self.clock, job_deadline=self.deadline, network_room=self.net_room())
         except (OSError, outroot.WriteBlocked):  # the disk, not the network
-            return self.fail(index, spec, part, "OUTPUT_WRITE_FAILED")
+            return self.fail(index, spec, part, "OUTPUT_WRITE_FAILED", adapter=adapter)
         except Exception:  # noqa: BLE001 - an unexpected failure fails this item only; its text is never kept
-            return self.fail(index, spec, part, "TOOL_FAILED")
+            return self.fail(index, spec, part, "TOOL_FAILED", adapter=adapter)
         self.count_net(max(getattr(outcome, "bytes_received", 0) - counted[0], 0))  # held back, or past the sink
         if outcome.status != "ok":
             if outcome.code == "TIMEOUT" and self.clock() >= self.deadline:
                 self.timed_out = True
             self.timeout_kind = getattr(outcome, "timeout_kind", None)
-            return self.fail(index, spec, part, outcome.code, outcome)
-        try:
-            artifact = self.writer.commit(part, content_type=outcome.headers_clean.get("content-type"),
-                                          source_url_redacted=outcome.final_url_redacted, host_url=outcome.final_url_redacted)
-        except PathBlocked:
-            self.stop_code = "OUTPUT_PATH_BLOCKED"
-            return self.fail(index, spec, part, "OUTPUT_PATH_BLOCKED", outcome)
-        except Exception as exc:  # noqa: BLE001 - ArtifactError, a file taken away after the rename, anything else
-            code = "OUTPUT_WRITE_FAILED" if isinstance(exc, (OSError, artifacts.ArtifactError)) else "TOOL_FAILED"
-            return self.fail(index, spec, part, code, outcome)
+            return self.fail(index, spec, part, outcome.code, outcome, adapter)
+        if adapter == router.ADAPTER_EXTRACT:
+            return self.extract_page(index, spec, part, outcome)
+        artifact, failure = self.place(index, spec, part, outcome, adapter)
+        if failure is not None:
+            return failure
         self.used += artifact["bytes"]
         return self.entry(index, spec, None, outcome, artifact)
+
+    def place(self, index, spec, part, outcome, adapter, **marks):
+        """The downloaded part goes into files/ (`marks`: `role`, `mime`, `extra` of `ArtifactWriter.commit`). Returns
+        (the artifact, None) or (None, the failed item entry)."""
+        try:
+            return self.writer.commit(part, content_type=outcome.headers_clean.get("content-type"),
+                                      source_url_redacted=outcome.final_url_redacted,
+                                      host_url=outcome.final_url_redacted, **marks), None
+        except PathBlocked:
+            self.stop_code = "OUTPUT_PATH_BLOCKED"
+            return None, self.fail(index, spec, part, "OUTPUT_PATH_BLOCKED", outcome, adapter)
+        except Exception as exc:  # noqa: BLE001 - ArtifactError, a file taken away after the rename, anything else
+            code = "OUTPUT_WRITE_FAILED" if isinstance(exc, (OSError, artifacts.ArtifactError)) else "TOOL_FAILED"
+            return None, self.fail(index, spec, part, code, outcome, adapter)
+
+    def extract_page(self, index, spec, part, outcome):
+        """The page is in the part: when it is HTML (FR18.3) it is placed as the source artifact and read as text."""
+        adapter = router.ADAPTER_EXTRACT
+        if not extract.is_html(extract.read_head(part.path)):  # nothing is placed for a page that is not one
+            return self.fail(index, spec, part, "CONTENT_MISMATCH", dataclasses.replace(outcome, reason="not_html"), adapter)
+        html, failure = self.place(index, spec, part, outcome, adapter, role="source", mime="text/html",
+                                   extra={"untrusted": True})
+        if failure is not None:
+            return failure
+        return self.extract_placed(index, spec, outcome, html)
+
+    def extract_placed(self, index, spec, outcome, html):
+        """The page is placed (`html`): the child reads it in a folder of its own, the text is adopted as the first
+        artifact. Every way out takes the folder away and, unless the item succeeded, the page too (FR19.6)."""
+        item_id = "%04d" % index
+        item_root = os.path.join(self.job_dir, ".tmp", item_id if self.attempt == 1 else "%s-%d" % (item_id, self.attempt))
+        adapter, placed, entry = router.ADAPTER_EXTRACT, os.path.join(self.job_dir, html["path"]), None
+        try:
+            dirs = ytdlp.make_item_dirs(self.job_dir, item_id, self.check, self.attempt)
+            result = extract.run_extract_item(placed, dirs.root, outcome.headers_clean.get("content-type"), self.limits,
+                                              self.environ, self.extract_deps, self.clock, self.deadline, self.check)
+            self.note_core_job()
+            self.item_log(item_id, "extract", extract.stderr_tail(os.path.join(dirs.io, "stderr.bin")))
+            entry = self.extract_result(index, spec, outcome, html, result, dirs)
+        except PathBlocked:
+            self.stop_code = "OUTPUT_PATH_BLOCKED"
+            entry = self.entry(index, spec, "OUTPUT_PATH_BLOCKED", adapter=adapter)
+        except OSError:  # the disk (the folders, the child's files), not the child
+            entry = self.entry(index, spec, "OUTPUT_WRITE_FAILED", adapter=adapter)
+        except Exception:  # noqa: BLE001 - one item's surprise fails that item only (a Ctrl+C still passes through)
+            entry = self.entry(index, spec, "TOOL_FAILED", adapter=adapter)
+        finally:
+            self.clear_item(item_root)
+            if entry is None or entry["status"] != "succeeded":  # a failure, or a Ctrl+C on its way out
+                with contextlib.suppress(OSError):
+                    os.remove(placed)
+        return entry
+
+    def clear_item(self, item_root):
+        """Take the item folder away. The files of a child that was just ended can stay locked for a few milliseconds
+        (Windows lets go of the handles of a dead process a moment after it is gone), so a folder that is still there is
+        tried again, at most `CLEAR_TRIES` times; whatever cannot go is left, as `clear_item_dir` always does."""
+        for _ in range(CLEAR_TRIES):
+            ytdlp.clear_item_dir(item_root, self.check)
+            if not os.path.lexists(item_root):
+                return
+            time.sleep(CLEAR_PAUSE)
+
+    def extract_result(self, index, spec, outcome, html, result, dirs):
+        """The item entry for what the child gave: an error code, or the two artifacts (the text first)."""
+        adapter = router.ADAPTER_EXTRACT
+        if "process_tree_not_empty" in result.warnings and "process_tree_not_empty" not in self.warnings:
+            self.warnings.append("process_tree_not_empty")
+        if result.status != "succeeded":
+            if result.code == "TIMEOUT":
+                self.timed_out = self.timed_out or result.timeout_kind == "job"
+                self.timeout_kind = result.timeout_kind
+            return self.entry(index, spec, result.code, adapter=adapter, reason=result.reason, hint=result.hint,
+                              retryable=False)  # what went wrong in the extraction is final (FR19.3)
+        item_id, redacted = "%04d" % index, outcome.final_url_redacted
+        source = os.path.join(dirs.dl, "extract.md")  # in a folder only the core knows: the child cannot touch it
+        with open(source, "x", encoding="utf-8", newline="\n") as out:
+            out.write(extract.render_markdown(urlpolicy.redact(spec.url, _normalised(spec.url, self.policy)),
+                                              html["sha256"], result.text))
+        room = max(self.limits["max_total_bytes"] - self.used - html["bytes"], 0)  # both artifacts count (FR21.4)
+        try:
+            text = self.writer.adopt(
+                item_id, source, source_url_redacted=redacted, host_url=redacted, engine=extract.ENGINE,
+                engine_version=self.engine[0], max_bytes=min(self.limits["max_bytes_per_file"], room),
+                allowed_mimes=MARKDOWN_MIMES, role="extract", mime="text/markdown",
+                extra={"untrusted": True, "chars": len(result.text), "truncated": result.truncated})
+        except PathBlocked:
+            self.stop_code = "OUTPUT_PATH_BLOCKED"
+            return self.entry(index, spec, "OUTPUT_PATH_BLOCKED", adapter=adapter)
+        except artifacts.ArtifactError as exc:
+            code = {"mime": "CONTENT_MISMATCH", "size": "SIZE_LIMIT"}.get(exc.reason, "OUTPUT_WRITE_FAILED")
+            return self.entry(index, spec, code, adapter=adapter)
+        text["warnings"] = list(text["warnings"]) + result.warnings
+        self.used += html["bytes"] + text["bytes"]
+        entry = self.entry(index, spec, None, outcome, text, adapter=adapter)
+        entry["artifacts"] = [text, html]
+        entry["untrusted"].update(manifest.clean_untrusted(result.meta))
+        return entry
 
 
 def _undo_job(job_dir):
@@ -802,8 +939,7 @@ def _run(request, env, deps, policy, moment_of, state):
             entry = job.next_item(index, spec)
         except KeyboardInterrupt as stop:  # anywhere in an item that its own handlers do not cover
             job.cancelled = True
-            if getattr(stop, "process_tree_not_empty", False) and "process_tree_not_empty" not in job.warnings:
-                job.warnings.append("process_tree_not_empty")
+            job.note_tree(stop)
             writer.sweep()  # a .part opened just before the interrupt may not have reached its owner
             writer.discard(["%04d" % index])
             entry = job.entry(index, spec, "CANCELLED")

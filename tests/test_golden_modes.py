@@ -54,6 +54,23 @@ def test_the_plan_of_auto_and_direct_equals_the_golden_sample_but_for_the_two_ne
 
 
 @pytest.mark.parametrize("mode", ["auto", "direct"])
+def test_the_result_of_auto_and_direct_equals_the_golden_sample_but_for_the_declared_differences(tmp_path, mode):
+    """SPR-04 TK9 (FR21.5, SC29): the `run` of the two modes, now that `run` knows the extract mode, still gives the
+    sample (after `normalize`), and no artifact of these modes carries `role`, `untrusted`, `chars` or `truncated`."""
+    work = str(tmp_path / "work")
+    env = dict(os.environ, CRAWL_STUDIO_WORK=work)
+    with httpd.LocalServer() as server:
+        request = gen_golden.build(mode, server)
+        result, code = runner.run(request, env, {"policy": policy_for(server)})
+        assert code == 0 and isinstance(result["network_bytes"], int) and result["network_bytes"] >= 0
+        assert normalize(result, server.port, work, result["job_id"]) == golden("result", mode)
+    assert all(item["adapter"] == "direct-http" for item in result["items"])
+    for item in result["items"]:
+        for artifact in item["artifacts"]:
+            assert not {"role", "untrusted", "chars", "truncated"} & set(artifact)
+
+
+@pytest.mark.parametrize("mode", ["auto", "direct"])
 def test_the_golden_plan_items_carry_no_extract_marks(mode):
     sample = golden("plan", mode)
     assert all(item["adapter"] == "direct-http" for item in sample["items"])
