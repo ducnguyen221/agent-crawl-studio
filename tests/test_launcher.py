@@ -71,4 +71,6 @@ def test_resolve_that_writes_to_stderr_but_exits_0_with_a_real_python_runs_the_c
     # the core ran (it printed engines); the system python has no trafilatura, so the engine list may carry
     # DEPENDENCY_MISSING, which is not the launcher failing to find a venv
     assert "engines" in obj
+    # TK11: a missing engine can only be trafilatura (the system python has no extract engine); never yt-dlp or httpx
+    assert [name for name, engine in obj["engines"].items() if engine["status"] == "missing"] in ([], ["trafilatura"])
     assert obj.get("venv", {}).get("status") != "missing"

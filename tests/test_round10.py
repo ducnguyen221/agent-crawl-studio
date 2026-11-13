@@ -36,7 +36,7 @@ def fake_page_fetch(url, expect, limits, sink, policy, **kwargs):
                                  final_url_redacted=url, bytes_received=len(page))
 
 
-EXTRACT_STRIDE = 3
+EXTRACT_STRIDE = 1  # TK11: every line, not a sample
 
 
 def extract_scenario():
