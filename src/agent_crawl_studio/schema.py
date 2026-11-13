@@ -16,7 +16,7 @@ SCHEMA_VERSION = 1
 MAX_REQUEST_BYTES = 1024 * 1024
 REQUEST_KEYS = ("schema_version", "urls", "mode", "output_dir", "limits", "naming_policy", "existing_file_policy")
 URL_ITEM_KEYS = ("url", "expect")
-MODES = ("auto", "direct", "media", "gallery", "crawl")
+MODES = ("auto", "direct", "media", "gallery", "crawl", "extract")
 EXPECTS = ("auto", "binary", "html")
 NAMING_POLICIES = ("id_hash",)
 EXISTING_FILE_POLICIES = ("rename",)
@@ -130,6 +130,11 @@ def parse_request(raw):
     naming = _choice(doc.get("naming_policy", "id_hash"), NAMING_POLICIES, "$.naming_policy")
     existing = _choice(doc.get("existing_file_policy", "rename"), EXISTING_FILE_POLICIES, "$.existing_file_policy")
 
+    if mode == "extract":  # FR18.4: a page is read as text, so a binary expectation makes no sense
+        for index, spec in enumerate(specs):
+            if spec.expect == "binary":
+                raise _bad("$.urls[%d]" % index, "out_of_range")
+
     output_dir = doc.get("output_dir")
     if "output_dir" in doc:
         if not isinstance(output_dir, str):
@@ -181,6 +186,25 @@ def validate_plan(obj):
 RESULT_KEYS = ("schema_version", "kind", "job_id", "status", "started_at", "finished_at", "counts", "limits_effective",
                "items", "warnings")
 RESULT_ITEM_KEYS = ("id", "url_redacted", "url_sha256", "adapter", "status", "artifacts", "untrusted")
+ARTIFACT_ROLES = ("extract", "source")
+
+
+def _artifact_problems(artifact, where):
+    """FR21.5: `role`, `untrusted`, `chars`, `truncated` are optional; when present they must have their documented
+    value (the extract artifacts and only they carry them)."""
+    if not isinstance(artifact, dict):
+        return [where]
+    problems = []
+    if "role" in artifact and not (isinstance(artifact["role"], str) and artifact["role"] in ARTIFACT_ROLES):
+        problems.append(where + ".role")
+    if "untrusted" in artifact and artifact["untrusted"] is not True:
+        problems.append(where + ".untrusted")
+    chars = artifact.get("chars")
+    if "chars" in artifact and (isinstance(chars, bool) or not isinstance(chars, int) or chars < 0):
+        problems.append(where + ".chars")
+    if "truncated" in artifact and not isinstance(artifact["truncated"], bool):
+        problems.append(where + ".truncated")
+    return problems
 
 
 def validate_result(obj):
@@ -206,6 +230,9 @@ def validate_result(obj):
             attempts = item.get("attempts")
             if "attempts" in item and (isinstance(attempts, bool) or not isinstance(attempts, int) or attempts < 1):
                 problems.append("items[%d].attempts" % index)  # FR14.2: a whole number, 1 or more, when present
+            if isinstance(item.get("artifacts"), list):
+                for number, artifact in enumerate(item["artifacts"]):
+                    problems += _artifact_problems(artifact, "items[%d].artifacts[%d]" % (index, number))
         counts = obj.get("counts")
         if (obj.get("status") is not None and obj.get("job_id") is not None and isinstance(counts, dict)
                 and "total" in counts and len(obj["items"]) != counts["total"]):

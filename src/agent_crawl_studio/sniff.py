@@ -31,6 +31,7 @@ def looks_like_html(head):
 EXTENSIONS = {
     "application/pdf": "pdf", "image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp",
     "application/zip": "zip", "text/html": "html", "application/json": "json", "text/plain": "txt",
+    "text/markdown": "md",  # only `adopt` gives this type (to a file `detect` calls text/plain)
     "video/mp4": "mp4", "audio/mp4": "m4a", "video/webm": "webm", "video/x-matroska": "mkv", "audio/ogg": "ogg",
     "audio/mpeg": "mp3", "audio/wav": "wav",
 }

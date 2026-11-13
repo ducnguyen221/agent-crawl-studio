@@ -12,13 +12,13 @@ DEFAULTS = {
     "max_items": 100, "max_bytes_per_file": 2 * GiB, "max_total_bytes": 10 * GiB, "max_artifacts_per_item": 10,
     "concurrency": 3, "per_host_concurrency": 2, "connect_timeout": 15, "idle_timeout": 60,
     "item_timeout": 600, "media_item_timeout": 2700, "job_timeout": 4 * 3600, "retries": 3, "max_redirects": 5,
-    "max_html_bytes": 10 * MiB,
+    "max_html_bytes": 10 * MiB, "extract_timeout": 30, "max_extract_chars": 200_000,
 }
 CAPS = {
     "max_items": 1000, "max_bytes_per_file": 20 * GiB, "max_total_bytes": 100 * GiB, "max_artifacts_per_item": 50,
     "concurrency": 8, "per_host_concurrency": 4, "connect_timeout": 60, "idle_timeout": 300,
     "item_timeout": 4 * 3600, "media_item_timeout": 14400, "job_timeout": 24 * 3600, "retries": 5,
-    "max_redirects": 10, "max_html_bytes": 50 * MiB,
+    "max_redirects": 10, "max_html_bytes": 50 * MiB, "extract_timeout": 300, "max_extract_chars": 2_000_000,
 }
 
 
