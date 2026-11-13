@@ -8,8 +8,11 @@ import secrets
 import time
 import unicodedata
 
-from .artifacts import RETRY_DELAYS, retry_io  # noqa: F401 - RETRY_DELAYS is part of this module's contract
+from . import artifacts
+from .artifacts import retry_io
 from .winpath import PathBlocked
+
+RETRY_DELAYS = artifacts.RETRY_DELAYS  # part of this module's contract
 
 MAX_UNTRUSTED = 200
 STATUSES = ("succeeded", "failed", "blocked", "cancelled", "skipped")

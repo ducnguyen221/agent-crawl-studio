@@ -109,16 +109,17 @@ class DeadlineStream(httpcore.NetworkStream):
 class PinnedBackend(httpcore.NetworkBackend):
     """Resolve, filter and connect in one call, to an IP that passed `policy.ip_ok`."""
 
-    def __init__(self, policy):
+    def __init__(self, policy, clock=time.monotonic):
         self.policy = policy
+        self._clock = clock  # the one monotonic clock of this backend; tests may inject it
         self._inner = httpcore.SyncBackend()
-        self.deadline = None  # absolute time.monotonic() value set per request by the transport
+        self.deadline = None  # absolute `clock()` value set per request by the transport
 
     def remaining(self, timeout):
         """`timeout` capped by the time left before the deadline; a passed deadline is a timeout."""
         if self.deadline is None:
             return timeout
-        left = self.deadline - time.monotonic()
+        left = self.deadline - self._clock()
         if left <= 0:
             raise httpcore.ReadTimeout("deadline")
         return left if timeout is None else min(timeout, left)
@@ -150,7 +151,7 @@ class PinnedBackend(httpcore.NetworkBackend):
         if port not in self.policy.ports:
             raise NetError("URL_BLOCKED", "port_not_allowed")
         timeout = self.remaining(timeout)
-        started = time.monotonic()
+        started = self._clock()
         addresses = self._resolve(host, port, timeout)
         if not addresses:
             raise NetError("NETWORK_ERROR", "dns_failed")
@@ -159,7 +160,7 @@ class PinnedBackend(httpcore.NetworkBackend):
             raise NetError("URL_BLOCKED", "ip_not_public")
         last = None
         for ip in usable:  # the literal IP: the name is never resolved a second time
-            left = None if timeout is None else timeout - (time.monotonic() - started)
+            left = None if timeout is None else timeout - (self._clock() - started)
             if left is not None and left <= 0:  # one deadline for the whole connect phase, not one per address
                 raise last or httpcore.ConnectTimeout("connect deadline")
             try:
