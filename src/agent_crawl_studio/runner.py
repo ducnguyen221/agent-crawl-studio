@@ -10,22 +10,43 @@ the batch into a new job folder, one item after another, and ends every path (al
 
 import contextlib
 import os
+import shutil
 import time
 from datetime import datetime, timezone
 
-from . import artifacts, manifest, netfetch
+from . import artifacts, capabilities, manifest, netfetch, router
 from . import config as config_mod
 from . import limits, outroot, schema, urlpolicy
 from .capabilities import WorkRootError
-from .errors import ITEM_STATUS_FOR, JOB_EXIT, REASONS, error_object, item_error
+from .errors import HINTS, ITEM_STATUS_FOR, JOB_EXIT, REASONS, error_object, item_error
 from .winpath import PathBlocked
 
-ADAPTER_DIRECT = "direct-http"
-UNSUPPORTED_MODES = ("media", "gallery", "crawl")
+ADAPTER_DIRECT = router.ADAPTER_DIRECT
+UNSUPPORTED_MODES = ("gallery", "crawl")
 OUTROOT_PARAMS = ("attrs_of", "drive_type_of", "sync_root_of", "free_bytes_of", "realpath")
 
 
-def _item(index, spec, mode, policy):
+def _media_hosts(env):
+    try:
+        return config_mod.load_config(env).media_host_allowlist
+    except WorkRootError:
+        return config_mod.DEFAULT_MEDIA_HOSTS
+
+
+def _tools_present(env, deps):
+    """True when ffmpeg, node and the `yt-dlp` package are all there (FR8.5): the first two by their paths, the
+    package by its metadata, never by importing it."""
+    which = deps.get("which") or shutil.which
+    version_of = deps.get("version_of") or capabilities.default_version_of
+    if not capabilities.locate_ffmpeg(env, which) or not capabilities.locate_node(which, env):
+        return False
+    try:
+        return bool(version_of("yt-dlp"))
+    except LookupError:
+        return False
+
+
+def _item(index, spec, mode, policy, media_hosts, tools_ok):
     base = {
         "id": "%04d" % index,
         "url_redacted": urlpolicy.redact(spec.url),
@@ -33,12 +54,15 @@ def _item(index, spec, mode, policy):
         "expect": spec.expect,
     }
     try:
-        urlpolicy.check_url(spec.url, policy)
+        adapter = router.route(urlpolicy.check_url(spec.url, policy), mode, media_hosts)
     except urlpolicy.Blocked:
         return dict(base, adapter=None, decision="blocked", error=item_error("URL_BLOCKED"))
-    if mode in UNSUPPORTED_MODES:
+    if adapter is None:
         return dict(base, adapter=None, decision="blocked", error=item_error("UNSUPPORTED_SOURCE"))
-    return dict(base, adapter=ADAPTER_DIRECT, decision="allow")
+    if adapter == router.ADAPTER_MEDIA and not tools_ok():
+        return dict(base, adapter=adapter, decision="blocked",
+                    error=item_error("DEPENDENCY_MISSING", hint=HINTS["tools_missing"]))
+    return dict(base, adapter=adapter, decision="allow")
 
 
 def _blocked(error):
@@ -48,7 +72,15 @@ def _blocked(error):
 def plan(request, env, deps=None):
     deps = deps or {}
     policy = deps.get("policy") or urlpolicy.Policy()
-    items = [_item(n, spec, request.mode, policy) for n, spec in enumerate(request.urls, 1)]
+    media_hosts = _media_hosts(env)
+    present = []  # the tools are looked for once, and only when an item needs them
+
+    def tools_ok():
+        if not present:
+            present.append(_tools_present(env, deps))
+        return present[0]
+
+    items = [_item(n, spec, request.mode, policy, media_hosts, tools_ok) for n, spec in enumerate(request.urls, 1)]
     warnings = list(request.warnings)
     error = None
     output = None
@@ -175,8 +207,9 @@ def _entry(policy, index, spec, code=None, outcome=None, artifact=None, skipped=
 class _Job:
     """The state of one run: which item is next, what has been used, and why the rest must stop."""
 
-    def __init__(self, request, deps, policy, writer, job_dir):
+    def __init__(self, request, deps, policy, writer, job_dir, media_hosts=()):
         self.request, self.policy, self.writer, self.job_dir = request, policy, writer, job_dir
+        self.media_hosts = media_hosts
         self.limits = request.limits_effective
         self.clock = deps.get("clock", time.monotonic)
         self.fetch = deps.get("fetch") or netfetch.fetch_item
@@ -200,9 +233,11 @@ class _Job:
             self.timed_out = True
             return self.entry(index, spec, "TIMEOUT")
         try:
-            urlpolicy.check_url(spec.url, self.policy)
+            adapter = router.route(urlpolicy.check_url(spec.url, self.policy), self.request.mode, self.media_hosts)
         except urlpolicy.Blocked:
             return self.entry(index, spec, "URL_BLOCKED")
+        if adapter == router.ADAPTER_MEDIA:  # the yt-dlp adapter is wired into `run` in TK14
+            return self.entry(index, spec, "UNSUPPORTED_SOURCE")
         return self.download(index, spec)
 
     def download(self, index, spec):
@@ -468,7 +503,7 @@ def _run(request, env, deps, policy, moment_of, state):
     if refusal is not None:
         return refusal
     job_dir, writer, mf, log = pieces
-    job = _Job(request, deps, policy, writer, job_dir)
+    job = _Job(request, deps, policy, writer, job_dir, _media_hosts(env))
     manifest_failed = False
     for index, spec in enumerate(request.urls, 1):
         if manifest_failed:  # nothing more is run, but the result still lists every item (SPEC FR3.5)

@@ -99,7 +99,8 @@ def test_plan_media_allowed(world, no_socket, mode):
     result = run_plan(world, [YOUTUBE, PDF], mode=mode, deps=tools())
     first, second = result["items"]
     assert first["adapter"] == "yt-dlp" and first["decision"] == "allow" and "error" not in first
-    assert second["adapter"] == "direct-http" and second["decision"] == "allow"
+    expected = ("direct-http", "allow") if mode == "auto" else (None, "blocked")
+    assert (second["adapter"], second["decision"]) == expected
     assert result["network_checked"] is False
 
 
@@ -239,3 +240,11 @@ def test_a_request_path_with_dot_dot_is_not_mistaken_for_a_device(tmp_path):
 
 def test_validate_plan_flags_an_item_that_is_not_an_object(world):
     assert schema.validate_plan(dict(run_plan(world, [PDF]), items=["x"])) == ["items[0]"]
+
+def test_plan_looks_for_the_tools_once_for_many_media_items(world, no_socket):
+    calls = []
+    deps = tools()
+    deps["version_of"] = lambda name: calls.append(name) or "1"
+    result = run_plan(world, [YOUTUBE, YOUTUBE + "&t=2"], mode="media", deps=deps)
+    assert [i["decision"] for i in result["items"]] == ["allow", "allow"] and calls == ["yt-dlp"]
+
