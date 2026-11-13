@@ -1,12 +1,15 @@
 """SPR-03 FR8.1-FR8.4: the router picks an adapter from the normalised URL and the allowlist only. It opens no
 socket and never imports `yt_dlp`; the suffix rule is on whole labels."""
 
+import os
 import subprocess
 import sys
 
 import pytest
 
 from agent_crawl_studio import config, router, urlpolicy
+
+SRC = os.path.dirname(os.path.dirname(os.path.abspath(router.__file__)))
 
 HOSTS = ("youtube.com", "youtu.be")
 
@@ -76,7 +79,8 @@ def test_route_opens_no_socket_and_never_imports_yt_dlp(no_socket):
 
 def test_importing_the_router_does_not_import_yt_dlp():
     code = "import sys; from agent_crawl_studio import router; assert 'yt_dlp' not in sys.modules"
-    done = subprocess.run([sys.executable, "-X", "utf8", "-c", code], capture_output=True, text=True, timeout=60)
+    done = subprocess.run([sys.executable, "-X", "utf8", "-c", code], capture_output=True, text=True, timeout=60,
+                          env={**os.environ, "PYTHONPATH": SRC})
     assert done.returncode == 0, done.stderr
 
 

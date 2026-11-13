@@ -154,3 +154,127 @@ def test_the_file_rules_end_in_a_failed_item_with_the_folder_gone(world, server,
     result, _ = run_media(world, server, [YT], scenario)
     assert result["items"][0]["error"]["code"] == code and tmp_dirs(world, result) == []
     assert runner.schema.validate_result(result) == []
+
+
+# ---------------------------------------------------------------------------- vòng sửa 1 (review lát A)
+
+def failing(error):
+    def boom(*args, **kwargs):
+        raise error
+    return boom
+
+
+def test_a_blocked_folder_for_the_engine_stops_the_job(world, server, monkeypatch):
+    monkeypatch.setattr(runner.ytdlp, "make_item_dirs", failing(runner.PathBlocked("junction")))
+    result, code = run_media(world, server, [YT, YT])
+    assert [i["error"]["code"] for i in result["items"]] == ["OUTPUT_PATH_BLOCKED"] * 2
+
+
+def test_a_disk_error_making_the_folders_fails_only_that_item(world, server, monkeypatch):
+    monkeypatch.setattr(runner.ytdlp, "make_item_dirs", failing(OSError("disk")))
+    result, code = run_media(world, server, [YT])
+    assert result["items"][0]["error"]["code"] == "OUTPUT_WRITE_FAILED"
+
+
+def test_a_surprise_in_one_media_item_fails_that_item_and_the_next_one_runs(world, server, monkeypatch):
+    real = runner.ytdlp.build_command
+    calls = []
+
+    def once(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise ValueError("surprise")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(runner.ytdlp, "build_command", once)
+    result, code = run_media(world, server, [YT, "https://www.youtube.com/watch?v=other"])
+    first, second = result["items"]
+    assert first["error"]["code"] == "TOOL_FAILED" and first["adapter"] == "yt-dlp"
+    assert second["status"] == "succeeded" and result["status"] in ("partial", "succeeded")
+    assert tmp_dirs(world, result) == []
+
+
+def test_a_log_that_cannot_be_written_never_fails_the_item(world, server, monkeypatch):
+    monkeypatch.setattr(runner.ytdlp, "read_tail", failing(OSError("log")))
+    result, code = run_media(world, server, [YT])
+    assert code == 0 and result["items"][0]["status"] == "succeeded"
+
+
+def test_a_junction_in_the_place_of_logs_gets_no_engine_log(world, server):
+    spawned = []
+
+    def attrs(path):
+        if spawned and path.endswith(os.sep + "logs"):
+            return (0x400, 0)
+        return None
+
+    result, code = run_media(world, server, [YT], "fail_403", spawned=spawned, attrs_of=attrs)
+    logs = os.path.join(job_dir_of(world, result), "logs")
+    assert result["items"][0]["error"]["code"] == "NETWORK_ERROR"
+    assert not [name for name in os.listdir(logs) if name.endswith("-ytdlp.log")]
+
+
+def test_a_tree_that_stays_is_a_job_warning_and_no_file_is_taken(world, server):
+    from agent_crawl_studio import jobobject
+
+    def stubborn(job, proc, wait=5.0):
+        jobobject.kill_tree(job, proc, wait)
+        return False
+
+    result, code = run_media(world, server, [YT], kill_tree=stubborn)
+    assert "process_tree_not_empty" in result["warnings"]
+    assert result["items"][0]["error"]["code"] == "TOOL_FAILED" and files_of(world, result) == []
+    assert manifest_of(world, result) == result
+
+
+def test_ctrl_c_with_a_tree_that_stays_is_a_job_warning(world, server):
+    from agent_crawl_studio import jobobject
+
+    def stubborn(job, proc, wait=5.0):
+        jobobject.kill_tree(job, proc, wait)
+        return False
+
+    def boom(directory):
+        raise KeyboardInterrupt
+
+    result, code = run_media(world, server, [YT], kill_tree=stubborn, scan=boom)
+    assert code == 130 and "process_tree_not_empty" in result["warnings"]
+
+
+def test_a_media_item_that_runs_past_the_job_deadline_fails_the_job(world, server, monkeypatch):
+    real = runner.ytdlp.run_media_item
+    state = {"late": False}
+
+    def late(*args, **kwargs):
+        outcome = real(*args, **kwargs)
+        state["late"] = True
+        return outcome._replace(status="failed", code="TIMEOUT", file_path=None)
+
+    monkeypatch.setattr(runner.ytdlp, "run_media_item", late)
+    clock = lambda: 10 ** 9 if state["late"] else 0.0  # noqa: E731
+    result, code = run_media(world, server, [YT, YT], clock=clock)
+    assert result["status"] == "failed" and result["items"][0]["error"]["code"] == "TIMEOUT"
+
+
+def test_a_file_that_cannot_be_taken_in_because_of_the_path_stops_the_job(world, server, monkeypatch):
+    monkeypatch.setattr(artifacts.ArtifactWriter, "adopt", failing(runner.PathBlocked("junction")))
+    result, code = run_media(world, server, [YT])
+    assert result["items"][0]["error"]["code"] == "OUTPUT_PATH_BLOCKED" and tmp_dirs(world, result) == []
+
+
+def test_unreadable_metadata_is_flagged_on_the_artifact(world, server):
+    result, code = run_media(world, server, [YT], "json_bad")
+    artifact = result["items"][0]["artifacts"][0]
+    assert code == 0 and "metadata_unreadable" in artifact["warnings"]
+
+
+def test_adopt_gets_the_smaller_of_the_per_file_cap_and_the_budget_left(world, server, monkeypatch):
+    real, seen = artifacts.ArtifactWriter.adopt, []
+
+    def spy(self, item_id, src, **kwargs):
+        seen.append(kwargs["max_bytes"])
+        return real(self, item_id, src, **kwargs)
+
+    monkeypatch.setattr(artifacts.ArtifactWriter, "adopt", spy)
+    result, code = go(world, server, [YT], deps=media_deps(), mode="media", limits={"max_total_bytes": 10 ** 6})
+    assert code == 0 and seen == [min(result["limits_effective"]["max_bytes_per_file"], 10 ** 6)]

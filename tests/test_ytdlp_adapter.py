@@ -4,6 +4,7 @@ the command, the closed failure table, untrusted metadata, log redaction. No pro
 
 import json
 import os
+import pathlib
 import subprocess
 import sys
 import time
@@ -594,3 +595,63 @@ def test_the_folder_helpers_ignore_what_is_not_there(tmp_path):
     assert ytdlp._is_reparse(gone) is False
     ytdlp._remove_tree(gone)
     assert not os.path.exists(gone)
+
+
+# ---------------------------------------------------------------------------- vòng sửa 1 (review lát A)
+
+@pytest.mark.parametrize("text", [
+    "HTTPS://r.example.com/v?sig=AAASECRET",
+    "GET //r.example.com/v?sig=BBBSECRET now",
+    "rtmps://h.example.com/x?token=CCCSECRET",
+    "wss://h.example.com/x?token=DDDSECRET",
+    "ERROR: https%3A%2F%2Fr.example.com%2Fv%3Fsig%3DEEESECRET end",
+    "Https%3a%2f%2fh.example.com%2Fv%3Fsig%3DFFFSECRET",
+])
+def test_redact_log_hides_every_url_form(text):
+    got = ytdlp.redact_log(text)
+    assert "SECRET" not in got and "REDACTED" in got
+
+
+def test_redact_log_keeps_a_double_slash_that_is_not_a_url():
+    assert ytdlp.redact_log("a // b and path a//b") == "a // b and path a//b"
+
+
+def test_read_tail_drops_the_first_line_when_the_file_was_cut(tmp_path):
+    path = tmp_path / "stderr.bin"
+    url_line = b"ERROR: https://r.example.com/videoplayback?sig=SIGSECRET123&expire=1\n"
+    path.write_bytes(url_line + b"x" * (ytdlp.MAX_LOG - 30) + b"\nlast line\n")  # the cut lands inside the URL
+    got = ytdlp.redact_log(ytdlp.read_tail(str(path)))
+    assert "SIGSECRET123" not in got and got.endswith("last line\n")
+    short = tmp_path / "short.bin"
+    short.write_bytes(b"one\ntwo\n")
+    assert ytdlp.read_tail(str(short)) == "one\ntwo\n"
+    one_line = tmp_path / "one.bin"
+    one_line.write_bytes(b"y" * (ytdlp.MAX_LOG + 5))
+    assert ytdlp.read_tail(str(one_line)) == ""
+
+
+def test_tree_usage_counts_the_whole_item_folder_and_follows_no_junction(tmp_path):
+    dirs = ytdlp.make_item_dirs(str(tmp_path), "0001", None)
+    pathlib.Path(dirs.dl, "media.mp4").write_bytes(b"a" * 10)
+    os.mkdir(os.path.join(dirs.cache, "sub"))
+    pathlib.Path(dirs.cache, "sub", "c").write_bytes(b"b" * 7)
+    pathlib.Path(dirs.home, "h").write_bytes(b"c" * 3)
+    pathlib.Path(dirs.io, "stderr.bin").write_bytes(b"d" * 5)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "big").write_bytes(b"z" * 1000)
+    done = subprocess.run(["cmd", "/c", "mklink", "/J", os.path.join(dirs.cache, "link"), str(outside)],
+                          capture_output=True)
+    assert done.returncode == 0
+    assert ytdlp.tree_usage(dirs.root) == (25, 5)
+    assert ytdlp.tree_usage(os.path.join(str(tmp_path), "missing")) == (0, 0)
+
+
+def test_size_watch_counts_what_is_written_outside_dl(tmp_path):
+    outcome, _ = media(tmp_path, "sleep_then_ok", tree_usage=lambda root: (11, 0), room=10, scan=lambda dl: [])
+    assert (outcome.status, outcome.code) == ("failed", "OUTPUT_WRITE_FAILED")
+
+
+def test_size_watch_caps_the_engine_output_files(tmp_path):
+    outcome, _ = media(tmp_path, "sleep_then_ok", tree_usage=lambda root: (0, ytdlp.IO_CAP + 1))
+    assert (outcome.status, outcome.code, outcome.retryable) == ("failed", "SIZE_LIMIT", False)

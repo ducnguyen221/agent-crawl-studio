@@ -45,7 +45,10 @@ MARKERS = (
 )
 FALLBACK = ("TOOL_FAILED", None, False)
 
-_URL = re.compile(r"(https?)://(?:[^/\s?#@]*@)?([^/\s?#]*)[^\s]*")
+_URL = re.compile(r"(?<![a-z0-9+.\-])([a-z][a-z0-9+.\-]*)://(?:[^/\s?#@]*@)?([^/\s?#]*)[^\s]*", re.IGNORECASE)  # any scheme, any case
+_BARE_URL = re.compile(r"(?<![:/\w])//(?:[^/\s?#@]*@)?([^/\s?#]+)[^\s]*")  # `//host/...`, no scheme
+_ENCODED_URL = re.compile(r"(?<![a-z0-9+.\-])(?:[a-z][a-z0-9+.\-]*)?%3A%2F%2F\S*", re.IGNORECASE)  # `https%3A%2F%2F...`
+IO_CAP = 2 * MAX_METADATA  # stdout.bin / stderr.bin are not meant to outgrow this
 
 
 def make_item_dirs(job_dir, item_id, check):
@@ -146,7 +149,9 @@ def redact_log(text, secrets=()):
     for secret in secrets:
         if isinstance(secret, str) and secret:
             text = text.replace(secret, "REDACTED")
+    text = _ENCODED_URL.sub("REDACTED", text)
     text = _URL.sub(lambda found: "%s://%s/REDACTED" % (found.group(1), found.group(2)), text)
+    text = _BARE_URL.sub(lambda found: "//%s/REDACTED" % found.group(1), text)
     encoded = text.encode("utf-8", "replace")
     if len(encoded) > MAX_LOG:
         text = encoded[-MAX_LOG:].decode("utf-8", "ignore")
@@ -271,6 +276,35 @@ def scan_sizes(dl):
     return sizes
 
 
+def tree_usage(root):
+    """(total bytes of every plain file under `<job>/.tmp/<id>/`, the largest file in `io/`); no reparse point is
+    followed or counted (FR12.4: the watch sees what the engine, node and ffmpeg write, not only `dl/`)."""
+    total, io_largest = 0, 0
+    io_dir = os.path.join(root, "io")
+    pending = [root]
+    while pending:
+        here = pending.pop()
+        try:
+            with os.scandir(here) as entries:
+                found = [entry.path for entry in entries]
+        except OSError:
+            continue
+        for path in found:
+            try:
+                info = os.lstat(path)
+            except OSError:
+                continue
+            if getattr(info, "st_file_attributes", 0) & REPARSE:
+                continue
+            if stat.S_ISDIR(info.st_mode):
+                pending.append(path)
+            elif stat.S_ISREG(info.st_mode):
+                total += info.st_size
+                if here == io_dir:
+                    io_largest = max(io_largest, info.st_size)
+    return total, io_largest
+
+
 def _size_verdict(sizes, cap, budget, room):
     """FR12.4: the error code that ends the run, or None."""
     if not sizes:
@@ -299,8 +333,13 @@ def _tail(path, size):
 
 
 def read_tail(path):
-    """The last 256 KiB of a file as text (nothing when it cannot be read)."""
-    return _tail(path, MAX_LOG).decode("utf-8", "replace")
+    """The last 256 KiB of a file as text (nothing when it cannot be read). When the file was longer, the first
+    line is dropped: it may start in the middle of a URL, which redaction could no longer recognise."""
+    data = _tail(path, MAX_LOG)
+    if len(data) >= MAX_LOG:
+        head, newline, rest = data.partition(b"\n")
+        data = rest if newline else b""
+    return data.decode("utf-8", "replace")
 
 
 def _head(path, size):
@@ -320,6 +359,9 @@ def _watch(proc, dirs, limits, budget, room, clock, deps):
     while True:
         exited = proc.poll() is not None
         verdict = _size_verdict(scan(dirs.dl), limits["max_bytes_per_file"], budget, room)
+        if not verdict:
+            total, io_largest = deps.get("tree_usage", tree_usage)(dirs.root)
+            verdict = "SIZE_LIMIT" if io_largest > IO_CAP else ("OUTPUT_WRITE_FAILED" if total > room else None)
         if verdict or exited:
             return verdict
         if clock() >= deadline:
@@ -357,6 +399,8 @@ def _run_engine(argv, env, dirs, limits, budget, room, clock, deps, streams, hol
     warnings = [] if clean else ["process_tree_not_empty"]
     if verdict:
         return _failed(verdict, warnings=warnings)  # a deadline or a size stop is never worth a retry
+    if not clean:  # FR10.1: nothing is picked or taken while a process of the tree may still write
+        return _failed("TOOL_FAILED", warnings=warnings)
     return _finish(proc, dirs, limits, warnings)
 
 
@@ -376,9 +420,10 @@ def run_media_item(url, item_id, dirs, limits, tools, *, budget, room, clock, de
         for name in ("stdout.bin", "stderr.bin"):
             streams.append(open(os.path.join(dirs.io, name), "wb"))
         return _run_engine(argv, env, dirs, limits, budget, room, clock, deps, streams, holder)
-    except BaseException:
+    except BaseException as exc:
         for proc, job in holder:  # an interrupt or a bug: the tree must not outlive this call
-            kill(job, proc)
+            if not kill(job, proc):
+                exc.process_tree_not_empty = True  # the runner turns this into a job warning (FR12.2)
         raise
     finally:
         for proc, job in holder:

@@ -128,7 +128,7 @@ def test_a_tree_that_stays_after_the_wait_is_reported(item, fake_clock):
     assert outcome.code == "TIMEOUT" and "process_tree_not_empty" in outcome.warnings
 
 
-def test_the_child_does_not_get_ctrl_c_from_the_console(item):
+def test_the_child_does_not_get_ctrl_c_from_the_console(item, monkeypatch):
     """FR12.6: the engine runs in its own process group; the core stops it by itself (see the interrupt test)."""
     seen = []
 
@@ -136,9 +136,44 @@ def test_the_child_does_not_get_ctrl_c_from_the_console(item):
         seen.append(argv)
         return jobobject.spawn_in_job(argv, env, cwd, out, err, holder=holder)
 
+    flags_seen = []
+    real = subprocess.Popen
+
+    def capture(*args, **kwargs):
+        flags_seen.append(kwargs.get("creationflags"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(jobobject.subprocess, "Popen", capture)
     waiter = interrupt_when_tree_is_up(item)
     with pytest.raises(KeyboardInterrupt):
         run_tree(item, {"spawn": spy})
     waiter.join(5)
     assert seen and seen[0][:4] == [sys.executable, "-P", FAKE, "tree3"]
-    assert jobobject.CREATE_NEW_PROCESS_GROUP and jobobject.CREATE_NO_WINDOW
+    assert flags_seen and flags_seen[0] & jobobject.CREATE_NEW_PROCESS_GROUP
+    assert flags_seen[0] & jobobject.CREATE_NO_WINDOW
+
+
+def test_an_interrupt_with_a_tree_that_stays_marks_the_exception(item):
+    """FR12.2: the Ctrl+C path reports a tree that was not empty in time, for the runner to turn into a warning."""
+    def stubborn(job, proc, wait=5.0):
+        jobobject.kill_tree(job, proc, wait)
+        return False
+
+    waiter = interrupt_when_tree_is_up(item)
+    with pytest.raises(KeyboardInterrupt) as caught:
+        run_tree(item, {"kill_tree": stubborn})
+    waiter.join(5)
+    assert caught.value.process_tree_not_empty is True
+
+
+def test_a_tree_that_is_not_empty_after_a_clean_exit_takes_no_file(item):
+    """FR10.1: the file is picked only after the tree is dead; otherwise the item fails and nothing is taken."""
+    def stubborn(job, proc, wait=5.0):
+        jobobject.kill_tree(job, proc, wait)
+        return False
+
+    deps = {"engine_prefix": lambda: [sys.executable, "-P", FAKE, "ok_mp4"], "kill_tree": stubborn}
+    outcome = ytdlp.run_media_item(URL, "0001", item, LIMITS, TOOLS, budget=10 ** 12, room=10 ** 12,
+                                   clock=time.monotonic, deps=dict(deps, poll=0.05))
+    assert (outcome.status, outcome.code, outcome.file_path) == ("failed", "TOOL_FAILED", None)
+    assert "process_tree_not_empty" in outcome.warnings
