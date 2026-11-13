@@ -107,3 +107,10 @@ def test_several_relative_roots_without_an_opcos_base_give_one_warning(tmp_path)
     put(tmp_path, {"output_roots": ["a/b", "c/d"]})
     cfg = config.load_config({"CRAWL_STUDIO_WORK": str(tmp_path / "w")})
     assert cfg.warnings == ["root_ignored"] and cfg.output_roots == [str(tmp_path / "w")]
+
+
+def test_invalid_allowlist_lines_are_dropped_with_a_warning(tmp_path):
+    put(tmp_path, {"media_host_allowlist": [".YouTube.com.", "com", "10.0.0.1", "localhost", "bücher.de"]})
+    cfg = config.load_config(env_for(tmp_path))
+    assert tuple(cfg.media_host_allowlist) == ("youtube.com", "xn--bcher-kva.de")
+    assert cfg.warnings == ["media_host_ignored"]
