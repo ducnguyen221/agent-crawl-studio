@@ -6,10 +6,12 @@ import json
 import os
 import subprocess
 import sys
+import time
 
 import pytest
 
-from agent_crawl_studio import envbuild, flags, limits, ytdlp
+from agent_crawl_studio import envbuild, flags, jobobject, limits, ytdlp
+from fixtures import procs
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FAKE = os.path.join(HERE, "fixtures", "fake_ytdlp.py")
@@ -303,3 +305,197 @@ def test_the_child_environment_holds_only_allowed_keys(tmp_path, monkeypatch):
     assert reported["TEMP"] == str(home)
     untrusted, _, warnings = ytdlp.parse_metadata(done.stdout.encode())
     assert warnings == [] and untrusted == {}  # the env report has none of the four fields
+
+
+# ------------------------------------------------------------------- SPR-03 TK7: run_media_item (FR9.6, FR10.1, FR12)
+
+MiB = 2 ** 20
+GiB = 2 ** 30
+TOOLS = ytdlp.Tools(FFMPEG_DIR, NODE, "2026.10.26")
+LIMITS = limits.resolve({})[0]
+
+
+def media(tmp_path, scenario, *, limits_in=None, budget=10 ** 12, room=10 ** 12, clock=time.monotonic, **deps_extra):
+    dirs = ytdlp.make_item_dirs(str(tmp_path), "0001", None)
+    deps = {"engine_prefix": lambda: [sys.executable, "-P", FAKE, scenario], "poll": 0.05}
+    deps.update(deps_extra)
+    outcome = ytdlp.run_media_item(URL, "0001", dirs, limits_in or LIMITS, TOOLS, budget=budget, room=room,
+                                   clock=clock, deps=deps)
+    return outcome, dirs
+
+
+@pytest.fixture
+def spawned():
+    """Every (process, job) the code under test started; at teardown the processes are checked ended."""
+    seen = []
+    yield seen
+    stragglers = procs.reap([proc.pid for proc, _ in seen])
+    assert not stragglers, "processes left alive: %r" % (stragglers,)
+
+
+def recording_spawn(spawned):
+    def spawn(argv, env, cwd, out, err, holder=None):
+        mine = [] if holder is None else holder
+        result = jobobject.spawn_in_job(argv, env, cwd, out, err, holder=mine)
+        spawned.append(mine[0])
+        return result
+
+    return spawn
+
+
+def test_the_outcome_has_the_fields_of_the_contract():
+    assert ytdlp.MediaOutcome._fields == ("status", "code", "reason", "retryable", "file_path", "untrusted",
+                                          "declared_size", "warnings")
+
+
+def test_a_good_run_returns_the_one_file_and_the_clean_metadata(tmp_path):
+    outcome, dirs = media(tmp_path, "ok_mp4")
+    assert (outcome.status, outcome.code, outcome.retryable) == ("succeeded", None, False)
+    assert outcome.file_path == os.path.join(dirs.dl, "media.mp4")
+    assert outcome.untrusted == {"title": "Me at the zoo", "uploader": "jawed", "duration": "19", "extractor": "Youtube"}
+    assert outcome.warnings == []
+
+
+def test_unreadable_metadata_is_a_warning_not_a_failure(tmp_path):
+    outcome, _ = media(tmp_path, "json_bad")
+    assert outcome.status == "succeeded" and outcome.warnings == ["metadata_unreadable"] and outcome.untrusted == {}
+
+
+@pytest.mark.parametrize("scenario,code,reason,retryable", [
+    ("fail_429", "RATE_LIMITED", None, True),
+    ("fail_403", "NETWORK_ERROR", "forbidden", False),
+    ("fail_dns", "NETWORK_ERROR", "dns_failed", True),
+    ("title_marker", "TOOL_FAILED", None, False),
+])
+def test_a_failed_run_is_classified_from_its_stderr(tmp_path, scenario, code, reason, retryable):
+    outcome, dirs = media(tmp_path, scenario)
+    assert (outcome.status, outcome.code, outcome.reason, outcome.retryable) == ("failed", code, reason, retryable)
+    assert outcome.file_path is None
+    assert os.path.getsize(os.path.join(dirs.io, "stderr.bin")) > 0  # the raw log stays for the runner to redact
+
+
+def test_an_engine_that_cannot_start_is_tool_failed(tmp_path):
+    dirs = ytdlp.make_item_dirs(str(tmp_path), "0001", None)
+    deps = {"engine_prefix": lambda: [r"C:\no\such\python.exe"], "poll": 0.05}
+    outcome = ytdlp.run_media_item(URL, "0001", dirs, LIMITS, TOOLS, budget=10 ** 12, room=10 ** 12,
+                                   clock=time.monotonic, deps=deps)
+    assert (outcome.status, outcome.code, outcome.reason) == ("failed", "TOOL_FAILED", None)
+
+
+def test_the_engine_runs_with_the_item_environment_and_folder(tmp_path):
+    outcome, dirs = media(tmp_path, "print_env")
+    assert outcome.status == "succeeded"
+    with open(os.path.join(dirs.io, "stdout.bin"), "rb") as handle:
+        reported = json.loads(handle.read())
+    assert reported["TEMP"] == dirs.home
+
+
+# ----------------------------------------------------------------------------- size watch (FR12.4, FR12.5)
+
+def test_size_watch_a_stream_without_declared_length_is_cut_at_the_cap(tmp_path, spawned):
+    outcome, dirs = media(tmp_path, "big_stream", limits_in=dict(LIMITS, max_bytes_per_file=3 * MiB),
+                          spawn=recording_spawn(spawned))
+    assert (outcome.status, outcome.code, outcome.retryable) == ("failed", "SIZE_LIMIT", False)
+    assert spawned[0][0].poll() is not None  # the engine was ended, not left writing
+
+
+def test_size_watch_largest_file_over_the_budget(tmp_path):
+    outcome, _ = media(tmp_path, "sleep_then_ok", budget=4, scan=lambda dl: [5])
+    assert outcome.code == "SIZE_LIMIT"
+
+
+def test_size_watch_total_over_twice_the_cap(tmp_path):
+    cap = dict(LIMITS, max_bytes_per_file=4)
+    outcome, _ = media(tmp_path, "sleep_then_ok", limits_in=cap, scan=lambda dl: [3, 3, 3])  # each <= 4, 9 > 8
+    assert outcome.code == "SIZE_LIMIT"
+
+
+def test_size_watch_a_merge_peak_inside_the_budget_is_allowed(tmp_path):
+    peak = int(1.8 * GiB)
+    outcome, _ = media(tmp_path, "sleep_then_ok", budget=3 * GiB, scan=lambda dl: [peak, peak])  # 3.6 GiB at peak
+    assert outcome.status == "succeeded"
+
+
+def test_size_watch_a_full_disk_is_an_output_failure(tmp_path):
+    outcome, _ = media(tmp_path, "sleep_then_ok", room=5, scan=lambda dl: [10])
+    assert (outcome.status, outcome.code, outcome.retryable) == ("failed", "OUTPUT_WRITE_FAILED", False)
+
+
+def test_size_watch_default_scan_counts_regular_files_only(tmp_path):
+    dl = tmp_path / "dl"
+    dl.mkdir()
+    (dl / "a.part").write_bytes(b"x" * 10)
+    (dl / "b").write_bytes(b"y" * 5)
+    (dl / "sub").mkdir()
+    (dl / "sub" / "c").write_bytes(b"z" * 99)
+    assert sorted(ytdlp.scan_sizes(str(dl))) == [5, 10]
+    assert ytdlp.scan_sizes(str(tmp_path / "gone")) == []
+
+
+@pytest.mark.parametrize("scenario,code", [
+    ("zero_files_big", "SIZE_LIMIT"),  # exit 0, no file, a declared size over the cap
+    ("zero_files", "TOOL_FAILED"),     # exit 0, no file, nothing declared
+    ("ok_two_files", "TOOL_FAILED"),   # exit 0, two matching files
+])
+def test_zero_files_rule(tmp_path, scenario, code):
+    outcome, _ = media(tmp_path, scenario)
+    assert (outcome.status, outcome.code, outcome.file_path) == ("failed", code, None)
+
+
+def test_media_timeout(tmp_path, fake_clock, spawned):
+    def sleep(seconds):
+        time.sleep(0.05)
+        fake_clock.sleep(1.0)
+
+    outcome, _ = media(tmp_path, "sleep_then_ok", limits_in=dict(LIMITS, media_item_timeout=3), clock=fake_clock,
+                       sleep=sleep, spawn=recording_spawn(spawned))
+    assert (outcome.status, outcome.code, outcome.retryable) == ("failed", "TIMEOUT", False)
+    assert spawned[0][0].poll() is not None
+
+
+def test_tree_dead_before_pick(tmp_path, monkeypatch):
+    order = []
+    real_kill = jobobject.kill_tree
+    real_pick = ytdlp.pick_output
+
+    def kill(job, proc, wait=5.0):
+        order.append("kill")
+        return real_kill(job, proc, wait)
+
+    def pick(dl):
+        order.append("pick")
+        return real_pick(dl)
+
+    monkeypatch.setattr(ytdlp, "pick_output", pick)
+    outcome, _ = media(tmp_path, "ok_mp4", kill_tree=kill)
+    assert outcome.status == "succeeded" and order == ["kill", "pick"]
+
+
+# ----------------------------------------------------------------------------------------- pick_output
+
+def test_pick_output_takes_the_one_whitelisted_file(tmp_path):
+    (tmp_path / "media.mp4").write_bytes(b"x")
+    (tmp_path / "media.f251.webm").write_bytes(b"y")  # an intermediate: two dots, not on the whitelist
+    (tmp_path / "other.mp4").write_bytes(b"z")
+    assert ytdlp.pick_output(str(tmp_path)) == os.path.join(str(tmp_path), "media.mp4")
+
+
+@pytest.mark.parametrize("names,reason", [([], "none"), (["media.f1.mp4"], "none"), (["media.mp4", "media.webm"], "many")])
+def test_pick_output_refuses_zero_or_many(tmp_path, names, reason):
+    for name in names:
+        (tmp_path / name).write_bytes(b"x")
+    with pytest.raises(ytdlp.OutputError) as caught:
+        ytdlp.pick_output(str(tmp_path))
+    assert caught.value.reason == reason
+
+
+def test_pick_output_refuses_a_hard_link_and_a_directory(tmp_path):
+    (tmp_path / "src").write_bytes(b"x")
+    os.link(str(tmp_path / "src"), str(tmp_path / "media.mp4"))  # st_nlink == 2
+    with pytest.raises(ytdlp.OutputError) as caught:
+        ytdlp.pick_output(str(tmp_path))
+    assert caught.value.reason == "unsafe"
+    (tmp_path / "media.mp4").unlink()
+    (tmp_path / "media.mp4").mkdir()
+    with pytest.raises(ytdlp.OutputError):
+        ytdlp.pick_output(str(tmp_path))

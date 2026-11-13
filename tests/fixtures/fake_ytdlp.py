@@ -86,6 +86,10 @@ def main(argv):
                 handle.write(b"\x00" * (1 << 20))
                 handle.flush()
                 time.sleep(0.1)
+    elif scenario == "sleep_then_ok":
+        time.sleep(1.5)
+        _write(dl, "media.mp4", MP4)
+        _emit(OK_META)
     elif scenario == "zero_files_big":
         _emit({"title": "big", "filesize_approx": 10 ** 12})
     elif scenario == "zero_files":
