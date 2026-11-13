@@ -393,9 +393,11 @@ def test_the_engine_runs_with_the_item_environment_and_folder(tmp_path):
 # ----------------------------------------------------------------------------- size watch (FR12.4, FR12.5)
 
 def test_size_watch_a_stream_without_declared_length_is_cut_at_the_cap(tmp_path, spawned):
+    started = time.monotonic()
     outcome, dirs = media(tmp_path, "big_stream", limits_in=dict(LIMITS, max_bytes_per_file=3 * MiB),
                           spawn=recording_spawn(spawned))
     assert (outcome.status, outcome.code, outcome.retryable) == ("failed", "SIZE_LIMIT", False)
+    assert time.monotonic() - started < 20  # cut while writing (the fake writes for 60 s), not after it ended
     assert spawned[0][0].poll() is not None  # the engine was ended, not left writing
 
 
@@ -494,8 +496,39 @@ def test_pick_output_refuses_a_hard_link_and_a_directory(tmp_path):
     os.link(str(tmp_path / "src"), str(tmp_path / "media.mp4"))  # st_nlink == 2
     with pytest.raises(ytdlp.OutputError) as caught:
         ytdlp.pick_output(str(tmp_path))
-    assert caught.value.reason == "unsafe"
+    assert caught.value.reason == "not_plain"
     (tmp_path / "media.mp4").unlink()
     (tmp_path / "media.mp4").mkdir()
     with pytest.raises(ytdlp.OutputError):
         ytdlp.pick_output(str(tmp_path))
+
+
+# ------------------------------------------------------------------ I/O error branches of the folder helpers (TK8)
+
+def test_a_missing_folder_or_log_reads_as_nothing(tmp_path):
+    gone = str(tmp_path / "gone")
+    with pytest.raises(ytdlp.OutputError) as caught:
+        ytdlp.pick_output(gone)
+    assert caught.value.reason == "none"
+    assert ytdlp._tail(gone, 10) == b"" and ytdlp._head(gone, 10) == b""
+    assert ytdlp._regular(gone) is False
+
+
+def test_a_file_that_vanishes_during_the_scan_is_skipped(tmp_path, monkeypatch):
+    (tmp_path / "a").write_bytes(b"xx")
+    (tmp_path / "b").write_bytes(b"yyy")
+    real = os.lstat
+
+    def flaky(path, *args, **kwargs):
+        if str(path).endswith("a"):
+            raise FileNotFoundError(path)
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(ytdlp.os, "lstat", flaky)
+    assert ytdlp.scan_sizes(str(tmp_path)) == [3]
+
+
+def test_the_tail_and_head_of_a_log(tmp_path):
+    path = tmp_path / "log"
+    path.write_bytes(b"0123456789")
+    assert ytdlp._tail(str(path), 4) == b"6789" and ytdlp._head(str(path), 4) == b"0123"
