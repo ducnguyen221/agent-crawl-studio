@@ -9,7 +9,7 @@ from collections import namedtuple
 from dataclasses import dataclass, field
 
 from . import limits as limits_mod
-from .errors import ContractError
+from .errors import JOB_EXIT, ContractError
 
 SCHEMA_VERSION = 1
 MAX_REQUEST_BYTES = 1024 * 1024
@@ -184,6 +184,8 @@ def validate_result(obj):
     if not isinstance(obj, dict):
         return ["$"]
     problems = [key for key in RESULT_KEYS if key not in obj]
+    if obj.get("status") is not None and not (isinstance(obj["status"], str) and obj["status"] in JOB_EXIT):
+        problems.append("status")
     if isinstance(obj.get("items"), list):
         for index, item in enumerate(obj["items"]):
             if not isinstance(item, dict):

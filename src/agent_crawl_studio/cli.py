@@ -108,7 +108,7 @@ def _valid(argv):
 
 
 def _warning_to_stderr(message, category, filename, lineno, file=None, line=None):
-    sys.stderr.write(warnings.formatwarning(message, category, filename, lineno, line))
+    sys.stderr.write("warning: %s\n" % getattr(category, "__name__", "Warning"))  # the class only, never the text
 
 
 @contextlib.contextmanager

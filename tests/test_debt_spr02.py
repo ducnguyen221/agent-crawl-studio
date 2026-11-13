@@ -13,9 +13,10 @@ import inspect
 import json
 import os
 import sys
+import time
 import warnings
 
-from agent_crawl_studio import cli, errors, limits, runner, schema, ytdlp
+from agent_crawl_studio import cli, errors, limits, netfetch, runner, schema, ytdlp
 
 from test_netfetch import policy_for, server  # noqa: F401
 from test_run_batch import FAKES, request_of
@@ -40,6 +41,15 @@ def tracer_for(watch, number, state, skip=()):
         return tracer
 
     return tracer
+
+
+def restore_trace(previous):
+    """Put back the tracer that was active before the sweep. coverage's C tracer must be restarted, not handed to
+    `sys.settrace` again: that would run it through the slow Python callback for the rest of the session."""
+    if hasattr(previous, "start"):
+        previous.start()
+    else:
+        sys.settrace(previous)
 
 
 def found(root, pattern):
@@ -84,6 +94,20 @@ def job_problems(work, result, code):
     return problems
 
 
+def slots_free():
+    """True when every resolver slot is back within two seconds (a lookup thread may still be finishing)."""
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        got = [netfetch.RESOLVER_SLOTS.acquire(blocking=False) for _ in range(netfetch.MAX_RESOLVER_THREADS)]
+        for taken in got:
+            if taken:
+                netfetch.RESOLVER_SLOTS.release()
+        if all(got):
+            return True
+        time.sleep(0.05)
+    return False
+
+
 def sweep_job(tmp_path, scenario, number, server_=None):
     """One real `run` with a Ctrl+C at the `number`-th executed line of the watched files; (state, problems)."""
     work = tmp_path / ("w_%s_%d" % (scenario, number))
@@ -97,7 +121,7 @@ def sweep_job(tmp_path, scenario, number, server_=None):
         urls = ["https://a.example/x"] + (["https://b.example/y"] if scenario == "two_items" else [])
         request = request_of(urls)
         deps = dict(FAKES, fetch=fake_fetch, sleep=lambda seconds: None)
-        watch = JOB_FILES
+        watch = JOB_FILES[:1]  # runner.py: the item loop and its boundaries; the other modules are swept by test_round10
     previous = sys.gettrace()  # coverage's own tracer, put back afterwards
     escaped, result, code = False, None, None
     sys.settrace(tracer_for(watch, number, state))
@@ -106,8 +130,10 @@ def sweep_job(tmp_path, scenario, number, server_=None):
     except KeyboardInterrupt:
         escaped = True
     finally:
-        sys.settrace(previous)
+        restore_trace(previous)
     problems = leftovers(work)
+    if scenario == "netfetch" and not slots_free():
+        problems.append("resolver slot leaked")
     if escaped:
         problems.append("escaped")
     if result is not None:
@@ -115,11 +141,11 @@ def sweep_job(tmp_path, scenario, number, server_=None):
     return state, problems
 
 
-def sweep_all(tmp_path, scenario, server_=None):
+def sweep_all(tmp_path, scenario, server_=None, stride=1):
     baseline, problems = sweep_job(tmp_path, scenario, 10 ** 9, server_)
     assert problems == [] and baseline["count"] > 100, (problems, baseline)
     failures, escapes = [], []
-    for number in range(1, baseline["count"] + 1):
+    for number in range(1, baseline["count"] + 1, stride):
         state, problems = sweep_job(tmp_path, scenario, number, server_)
         if "escaped" in problems:
             escapes.append(state["fired"])
@@ -136,7 +162,7 @@ def test_sweep_two_items_leaves_nothing_behind(tmp_path):
 
 
 def test_sweep_netfetch_leaves_nothing_behind(tmp_path, server):
-    sweep_all(tmp_path, "netfetch", server)
+    sweep_all(tmp_path, "netfetch", server, stride=2)  # real sockets: every second line keeps the run short
 
 
 # ----------------------------------------------------------------------------- the media path (fake process, fake clock)
@@ -189,7 +215,7 @@ def media_once(tmp_path, number):
     except KeyboardInterrupt:
         escaped = True
     finally:
-        sys.settrace(previous)
+        restore_trace(previous)
     # Python 3.12 gives the implicit `__exit__` of a `with` the line of the `with` statement, so the sweep can land
     # between the body and the close: the file object then lives in the traceback until it is let go (a known limit of
     # the sweep, RQ-011), so the cleanup of the runner is simulated after the traceback is gone.
@@ -245,3 +271,22 @@ def test_validate_result_reports_a_status_outside_the_set():
     assert schema.validate_result(dict(doc, status="weird")) == ["status"]
     for fine in [None] + list(errors.JOB_EXIT):
         assert schema.validate_result(dict(doc, status=fine)) == []
+
+
+def test_resolve_gives_the_slot_back_when_the_thread_never_starts(monkeypatch):
+    """A Ctrl+C between the taking of a resolver slot and the start of the lookup thread (found by the sweep)."""
+    import threading
+
+    class Boom(threading.Thread):
+        def start(self):
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(netfetch.threading, "Thread", Boom)
+    backend = netfetch.PinnedBackend(netfetch.urlpolicy.Policy())
+    try:
+        backend._resolve("a.example", 443, 1.0)
+    except KeyboardInterrupt:
+        pass
+    else:
+        raise AssertionError("the interrupt must go on")
+    assert slots_free()

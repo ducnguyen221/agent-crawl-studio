@@ -41,15 +41,26 @@ def _tools_present(env, deps):
     return ytdlp.find_tools(env, which, version_of) is not None
 
 
+def _normalised(url, policy):
+    """The NormalizedUrl of `url`, or None when the policy refuses it (its redaction then keeps the old way)."""
+    try:
+        return urlpolicy.check_url(url, policy)
+    except urlpolicy.Blocked:
+        return None
+
+
 def _item(index, spec, mode, policy, media_hosts, tools_ok):
+    norm = _normalised(spec.url, policy)
     base = {
         "id": "%04d" % index,
-        "url_redacted": urlpolicy.redact(spec.url),
+        "url_redacted": urlpolicy.redact(spec.url, norm),
         "url_sha256": urlpolicy.url_sha256(spec.url, policy),
         "expect": spec.expect,
     }
     try:
-        adapter = router.route(urlpolicy.check_url(spec.url, policy), mode, media_hosts)
+        if norm is None:
+            raise urlpolicy.Blocked("url")
+        adapter = router.route(norm, mode, media_hosts)
     except urlpolicy.Blocked:
         return dict(base, adapter=None, decision="blocked", error=item_error("URL_BLOCKED"))
     if adapter is None:
@@ -174,7 +185,7 @@ class RunLog:
 
 def _entry(policy, index, spec, code=None, outcome=None, artifact=None, skipped=False):
     """The manifest item for an end state: a success (artifact), an error `code`, or `skipped`."""
-    entry = {"id": "%04d" % index, "url_redacted": urlpolicy.redact(spec.url),
+    entry = {"id": "%04d" % index, "url_redacted": urlpolicy.redact(spec.url, _normalised(spec.url, policy)),
              "url_sha256": urlpolicy.url_sha256(spec.url, policy), "adapter": None,
              "status": "skipped" if skipped else "succeeded", "artifacts": [], "untrusted": {}}
     if artifact is not None:

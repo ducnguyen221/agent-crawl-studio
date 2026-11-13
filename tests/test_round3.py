@@ -139,7 +139,7 @@ def test_library_warnings_become_stderr_text_not_exceptions_even_under_W_error(t
         warnings.simplefilter("error")
         rc = cli.main(["plan", "--request", str(request)], env={"CRAWL_STUDIO_WORK": str(tmp_path / "w")}, plan_fn=plan_fn)
     captured = capsys.readouterr()
-    assert rc == 0 and "library warning text" in captured.err and "library warning text" not in captured.out
+    assert rc == 0 and "UserWarning" in captured.err and "library warning text" not in captured.err + captured.out  # FR16.6: the class, not the text
     assert captured.out.count("\n") == 1
 
 
