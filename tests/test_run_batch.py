@@ -309,9 +309,3 @@ def test_secrets_in_urls_and_cookies_never_reach_the_manifest_or_the_log(world, 
     assert "SECRET" not in log and "hop=1" not in log and "sid=abc" not in log
     assert len(log.splitlines()) == 1 and log.endswith("\n")
     assert result["items"][0]["url_redacted"].endswith("token=REDACTED")
-
-def test_media_route_is_not_wired_into_run_until_tk14(world, server, no_socket):
-    # transitional: TK13/TK14 replace this with the real yt-dlp run
-    result, code = go(world, server, ["https://www.youtube.com/watch?v=abc"], mode="media", deps={"policy": urlpolicy.Policy()})
-    assert code == 1 and result["items"][0]["error"]["code"] == "UNSUPPORTED_SOURCE"
-

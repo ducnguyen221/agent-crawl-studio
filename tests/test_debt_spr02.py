@@ -1,9 +1,8 @@
 """SPR-03 TK11 (FR16.2, FR16.3, FR16.6, SC21): debts left by SPR-02.
 
 * the Ctrl+C sweep (`sys.settrace`, one injected KeyboardInterrupt per executed line) now also covers a batch of
-  two items, the real `netfetch` code and the media path (FR16.3). The media scenario sweeps the building blocks
-  `run_media_item` + `clear_item_dir` with a fake spawner and a fake clock: the runner is wired to the media path in
-  TK14, where `tests/test_run_media.py` covers the whole item;
+  two items, the real `netfetch` code and the media path (FR16.3): the building blocks `run_media_item` +
+  `clear_item_dir` with a fake spawner, and (TK14) the whole runner with a media item (`media_run`);
 * `url_redacted` uses the normalised host (FR16.2); `cli._quiet` prints the warning class only and
   `validate_result` reports an unknown `status` (FR16.6).
 """
@@ -16,7 +15,7 @@ import sys
 import time
 import warnings
 
-from agent_crawl_studio import cli, errors, limits, netfetch, runner, schema, ytdlp
+from agent_crawl_studio import cli, errors, limits, netfetch, runner, schema, urlpolicy, ytdlp
 
 from test_netfetch import policy_for, server  # noqa: F401
 from test_run_batch import FAKES, request_of
@@ -113,7 +112,13 @@ def sweep_job(tmp_path, scenario, number, server_=None):
     work = tmp_path / ("w_%s_%d" % (scenario, number))
     env = {"CRAWL_STUDIO_WORK": str(work), "OPCOS_ROOT": str(work / "o"), "USERPROFILE": str(work / "h")}
     state = {"count": 0, "fired": None}
-    if scenario == "netfetch":
+    if scenario == "media_run":  # the whole runner with the media path: fake engine process, fake tools and DNS
+        request = request_of(["https://www.youtube.com/watch?v=jNQXAC9IVRw"], mode="media")
+        deps = dict(FAKES, sleep=lambda seconds: None, which=lambda cmd, path=None: "C:\\tools\\%s.exe" % cmd,
+                    version_of=lambda name: "1", dns_probe=lambda host: urlpolicy.DNS_OK, spawn=fake_media_spawn,
+                    kill_tree=lambda job, proc: True, engine_prefix=lambda: ["fake-engine"], poll=0, environ={})
+        watch = JOB_FILES[:1] + MEDIA_FILES[:1]
+    elif scenario == "netfetch":
         request = request_of([server_.url("/ok")])
         deps = dict(FAKES, policy=policy_for(server_), sleep=lambda seconds: None)
         watch = NET_FILES
@@ -181,6 +186,16 @@ class FakeJob:
         self.closed = True
 
 
+def fake_media_spawn(argv, env, cwd, out, err, holder=None):
+    dl = [a for a in argv if a.startswith("home:")][0][5:]
+    with open(os.path.join(dl, "media.mp4"), "wb") as handle:
+        handle.write(b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 64)
+    out.write(b'{"title":"t","duration":1}\n')
+    proc, job = FakeProc(), FakeJob()
+    holder.append((proc, job))
+    return proc, job
+
+
 def media_once(tmp_path, number):
     """`run_media_item` + the cleanup the runner owes it, with a Ctrl+C at the `number`-th executed line."""
     job_dir = tmp_path / ("m%d" % number)
@@ -225,6 +240,10 @@ def media_once(tmp_path, number):
     if any(proc not in killed for proc in spawned):
         problems.append("a spawned process was not ended")
     return state, problems, escaped
+
+
+def test_sweep_media_through_the_runner_leaves_nothing_behind(tmp_path):
+    sweep_all(tmp_path, "media_run", stride=3)  # every third line keeps the run short
 
 
 def test_sweep_media_path_ends_the_tree_and_leaves_no_folder(tmp_path):
