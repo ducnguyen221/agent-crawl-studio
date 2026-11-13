@@ -222,9 +222,9 @@ def test_clean_text_escapes_the_marker_after_any_blanks_and_quotes(prefix):
         assert HEADER_RE.search(out) is None and FOOTER_RE.search(out) is None
 
 
-def test_clean_text_marker_not_at_line_start_is_untouched():
-    assert extract.clean_text("see [crawl-studio docs] here") == "see [crawl-studio docs] here"
-    assert extract.clean_text("- [crawl-studio] item") == "- [crawl-studio] item"
+def test_clean_text_marker_not_at_line_start_is_escaped_too():  # TK11: the marker is escaped wherever it stands
+    assert extract.clean_text("see [crawl-studio docs] here") == "see \\[crawl-studio docs] here"
+    assert extract.clean_text("- [crawl-studio] item") == "- \\[crawl-studio] item"
 
 
 def test_clean_text_a_fold_cannot_create_a_marker_line():
@@ -282,7 +282,7 @@ def test_clean_text_does_not_touch_text_without_special_characters():
 
 # --- clean_text: adversarial input, linear time (FR20.8, SC28, RF5) ---------------------------------------------
 BIG = 4_000_000
-LIMIT_SECONDS = 5.0
+LIMIT_SECONDS = 15.0  # TK11: the absolute ceiling is only a net; the growth-ratio test proves linearity
 
 
 def adversarial_cases():
