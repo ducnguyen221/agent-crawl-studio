@@ -12,6 +12,7 @@ import stat
 import sys
 import time
 from collections import namedtuple
+from urllib.parse import urlsplit
 
 from . import capabilities, envbuild, errors, flags, jobobject
 
@@ -350,7 +351,7 @@ def _head(path, size):
         return b""
 
 
-def _watch(proc, dirs, limits, budget, room, clock, deps):
+def _watch(proc, dirs, limits, budget, room, clock, deps, proxy=None):
     """The 0.5 s loop (FR12.4): returns the code that ended the run, or None when the engine exited by itself."""
     scan = deps.get("scan", scan_sizes)
     sleep = deps.get("sleep", time.sleep)
@@ -358,7 +359,8 @@ def _watch(proc, dirs, limits, budget, room, clock, deps):
     deadline = clock() + limits["media_item_timeout"]
     while True:
         exited = proc.poll() is not None
-        verdict = _size_verdict(scan(dirs.dl), limits["max_bytes_per_file"], budget, room)
+        verdict = "SIZE_LIMIT" if proxy is not None and proxy.over_cap.is_set() else None  # FR13.5
+        verdict = verdict or _size_verdict(scan(dirs.dl), limits["max_bytes_per_file"], budget, room)
         if not verdict:
             total, io_largest = deps.get("tree_usage", tree_usage)(dirs.root)
             verdict = "SIZE_LIMIT" if io_largest > IO_CAP else ("OUTPUT_WRITE_FAILED" if total > room else None)
@@ -369,9 +371,22 @@ def _watch(proc, dirs, limits, budget, room, clock, deps):
         sleep(poll)
 
 
-def _finish(proc, dirs, limits, warnings):
+def _denied_code(proxy, url):
+    """FR13.10: the code of a run the proxy refused a destination of: the input's own host -> URL_BLOCKED, any
+    other (a redirect, a CDN) -> REDIRECT_BLOCKED; None when the proxy refused nothing."""
+    denied = list(proxy.denied) if proxy is not None else []
+    if not denied:
+        return None
+    host = (urlsplit(url).hostname or "").lower().rstrip(".")
+    return "URL_BLOCKED" if any(name == host for name, _ in denied) else "REDIRECT_BLOCKED"
+
+
+def _finish(proc, dirs, limits, warnings, proxy=None, url=""):
     """After the tree is dead: the outcome of an engine that ended by itself."""
     if proc.returncode != 0:
+        refused = _denied_code(proxy, url)
+        if refused:  # the proxy's word comes before the table (FR13.10)
+            return _failed(refused, warnings=warnings)
         text = _tail(os.path.join(dirs.io, "stderr.bin"), MAX_LOG).decode("utf-8", "replace")
         code, reason, retryable = classify_failure(text)
         return _failed(code, reason, retryable, warnings)
@@ -385,7 +400,7 @@ def _finish(proc, dirs, limits, warnings):
     return MediaOutcome("succeeded", None, None, False, path, untrusted, declared, warnings + meta_warnings)
 
 
-def _run_engine(argv, env, dirs, limits, budget, room, clock, deps, streams, holder):
+def _run_engine(argv, env, dirs, limits, budget, room, clock, deps, streams, holder, proxy=None, url=""):
     kill = deps.get("kill_tree", jobobject.kill_tree)
     spawn = deps.get("spawn", jobobject.spawn_in_job)
     try:
@@ -394,20 +409,21 @@ def _run_engine(argv, env, dirs, limits, budget, room, clock, deps, streams, hol
         return _failed("TOOL_FAILED", "job_object_unavailable")  # the process (if any) was ended by the spawner
     except OSError:
         return _failed("TOOL_FAILED")
-    verdict = _watch(proc, dirs, limits, budget, room, clock, deps)
+    verdict = _watch(proc, dirs, limits, budget, room, clock, deps, proxy)
     clean = kill(job, proc)  # before anything is read or picked: the tree is dead first (FR10.1)
     warnings = [] if clean else ["process_tree_not_empty"]
     if verdict:
         return _failed(verdict, warnings=warnings)  # a deadline or a size stop is never worth a retry
     if not clean:  # FR10.1: nothing is picked or taken while a process of the tree may still write
         return _failed("TOOL_FAILED", warnings=warnings)
-    return _finish(proc, dirs, limits, warnings)
+    return _finish(proc, dirs, limits, warnings, proxy, url)
 
 
-def run_media_item(url, item_id, dirs, limits, tools, *, budget, room, clock, deps):
+def run_media_item(url, item_id, dirs, limits, tools, *, budget, room, clock, deps, proxy=None):
     """Run the engine for one item and return a MediaOutcome (FR9.6, FR10.1, FR12). `budget` is what is left of
     `max_total_bytes`, `room` what the disk lets the folder use; `deps` injects `engine_prefix`, `spawn`,
-    `kill_tree`, `scan`, `sleep`, `poll`, `environ`, `proxy_url`. The engine's stdout and stderr go to files in
+    `kill_tree`, `scan`, `sleep`, `poll`, `environ`, `proxy_url`; `proxy` is the item's egress proxy (stops the run
+    when its byte cap is crossed, names a refused destination, FR13.5, FR13.10). The engine's stdout and stderr go to files in
     `dirs.io` (the runner redacts them). On any way out - including Ctrl+C - the tree is ended and empty before
     this returns or re-raises."""
     argv = build_command(deps.get("engine_prefix", engine_prefix)(), url, tools, dirs, limits,
@@ -419,7 +435,7 @@ def run_media_item(url, item_id, dirs, limits, tools, *, budget, room, clock, de
     try:
         for name in ("stdout.bin", "stderr.bin"):
             streams.append(open(os.path.join(dirs.io, name), "wb"))
-        return _run_engine(argv, env, dirs, limits, budget, room, clock, deps, streams, holder)
+        return _run_engine(argv, env, dirs, limits, budget, room, clock, deps, streams, holder, proxy, url)
     except BaseException as exc:
         for proc, job in holder:  # an interrupt or a bug: the tree must not outlive this call
             if not kill(job, proc):
