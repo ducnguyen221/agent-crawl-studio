@@ -102,7 +102,7 @@ class SkillDocTests(unittest.TestCase):
     def test_no_machine_paths_and_no_secrets(self):
         for path in all_doc_files():
             text = text_of(path)
-            self.assertNotRegex(text, r"[A-Za-z]:\\", str(path))
+            self.assertNotRegex(text, r"(?<![A-Za-z])[A-Za-z]:[\\/]", str(path))  # `C:\` and `C:/`, not `https://`
             self.assertNotRegex(text, r"(?i)\bUsers\b", str(path))
             self.assertNotRegex(text, r"(?i)\\\\[a-z0-9_.-]+\\", str(path))
             self.assertNotRegex(text, r"(?i)(api[_-]?key|secret|password|bearer)\s*[:=]\s*\S{8,}", str(path))
@@ -151,6 +151,95 @@ class SkillDocTests(unittest.TestCase):
         for heading in ("When to use", "Who does what", "Workflow", "Request cheat-sheet", "Reading the result",
                         "Errors -> what to do", "Safety rules"):
             self.assertRegex(text, r"(?m)^## " + re.escape(heading) + r"\b", heading)
+
+
+# --- TK16 (python RF7): the tables of the documents against the constants of the code --------------------------------
+SRC = ROOT / "src" / "agent_crawl_studio"
+UNITS = {"": 1, "s": 1, "h": 3600, "KiB": 2 ** 10, "MiB": 2 ** 20, "GiB": 2 ** 30}
+
+
+def errors_rows():
+    """`{code: cells}` of the table of `errors.md`: code, meaning, item status / exit, retryable, action."""
+    rows = {}
+    for line in text_of(SKILL_DIR / "references" / "errors.md").splitlines():
+        found = re.match(r"^\| `([A-Z_]+)` \|", line)
+        if found and found.group(1) in errors.CONTRACT_CODES:
+            rows[found.group(1)] = [cell.strip() for cell in line.strip().strip("|").split("|")]
+    return rows
+
+
+def amount(cell):
+    """The number at the front of a cell of the limits table (`2 GiB`, `15 s`, `4 h`, `200000`, `3 (accepted ...)`)."""
+    found = re.match(r"^([0-9][0-9_,]*)\s*(GiB|MiB|KiB|s|h)?\b", cell)
+    return int(found.group(1).replace(",", "").replace("_", "")) * UNITS[found.group(2) or ""]
+
+
+def limits_rows():
+    text = text_of(SKILL_DIR / "references" / "contract.md")
+    body = re.search(r"^### Limits\s*$(.*?)(?=^#{1,3} )", text, re.S | re.M).group(1)
+    return {row[0].strip("`"): row for row in table_rows(body)}
+
+
+def reason_codes_in_the_code():
+    """`{reason: {codes}}` for every `"CODE", "reason"` pair the sources write."""
+    found = {}
+    for path in sorted(SRC.glob("*.py")):
+        for code, reason in re.findall(r'"(NETWORK_ERROR|CONTENT_MISMATCH)",\s*"([a-z_]+)"', text_of(path)):
+            if reason in errors.REASONS:
+                found.setdefault(reason, set()).add(code)
+    return found
+
+
+class DocTablesAgainstTheCodeTests(unittest.TestCase):
+    def test_the_retryable_column_equals_errors_retryable(self):
+        rows = errors_rows()
+        self.assertEqual(sorted(rows), sorted(errors.CONTRACT_CODES))
+        for code, cells in rows.items():
+            self.assertEqual(len(cells), 5, code)
+            expected = "yes" if errors.RETRYABLE[code] else "no"
+            self.assertTrue(cells[3].startswith(expected), "%s: %r, the code says %s" % (code, cells[3], expected))
+
+    def test_the_item_status_column_equals_item_status_for(self):
+        for code, cells in errors_rows().items():
+            status = errors.ITEM_STATUS_FOR.get(code)
+            if status is None:
+                self.assertIn("refused", cells[2], code)
+            else:
+                self.assertIn("`%s`" % status, cells[2], "%s: %r" % (code, cells[2]))
+
+    def test_the_limits_table_equals_the_defaults_and_the_hard_caps(self):
+        from agent_crawl_studio import limits
+        rows = limits_rows()
+        self.assertEqual(sorted(rows), sorted(limits.DEFAULTS))
+        for key, row in rows.items():
+            self.assertEqual(amount(row[1]), limits.DEFAULTS[key], "%s default" % key)
+            self.assertEqual(amount(row[2]), limits.HARD_CAPS[key], "%s hard cap" % key)
+
+    def test_every_reason_is_listed_under_the_code_the_code_gives_it(self):
+        found = reason_codes_in_the_code()
+        text = text_of(SKILL_DIR / "references" / "errors.md")
+        body = re.search(r"^## `reason` values.*?$(.*?)(?=^## )", text, re.S | re.M).group(1)
+        listed = {row[0].strip("`"): row[1].strip("`") for row in table_rows(body)}
+        self.assertEqual(sorted(listed), sorted(errors.REASONS))
+        for reason, codes in found.items():
+            self.assertEqual({listed[reason]}, codes, reason)
+        self.assertEqual(listed["content_encoding_unsupported"], "CONTENT_MISMATCH")  # the one the review caught
+
+    def test_the_machine_path_pattern_catches_both_slashes_and_not_urls(self):
+        pattern = re.compile(r"(?<![A-Za-z])[A-Za-z]:[\\/]")
+        for bad in ("C:\\Users\\x", "C:/Users/x", "see D:/data"):
+            self.assertTrue(pattern.search(bad), bad)
+        for fine in ("https://example.com/a", "a:b", "http://example.org"):
+            self.assertFalse(pattern.search(fine), fine)
+
+    def test_the_new_safety_sentences_are_written(self):
+        body = text_of(SKILL)
+        self.assertRegex(body, r"(?i)do not switch tool or mode on your own")
+        self.assertRegex(body, r"(?i)in `extract` a page is at most 5 MiB whatever `max_html_bytes` says")
+        self.assertRegex(body, r"(?i)under `logs/` is untrusted")
+        self.assertRegex(body, r"(?i)never open the saved `\.html` in a browser")
+        self.assertIn("two folders above this file", body)
+        self.assertRegex(body, r"(?i)all items failed: `failed`")
 
 
 if __name__ == "__main__":
