@@ -146,8 +146,8 @@ _DROP_TAGS = frozenset(["script", "style", "noscript", "template", "iframe", "ob
 _CONTROLS = frozenset(["input", "select", "textarea", "button", "option"])  # emptied; a `form` itself is kept
 _EXEMPT = frozenset(["html", "body"])  # the rules by attribute (hidden, aria-hidden, style) do not apply to these
 _HIDDEN_STYLE = re.compile(
-    r"display\s*:\s*none|visibility\s*:\s*hidden|font-size\s*:\s*0(?:\.0*)?(?![\d.])"
-    r"|opacity\s*:\s*0(?:\.0*)?(?![\d.])")
+    r"display\s*:\s*none|visibility\s*:\s*hidden|font-size\s*:\s*(?:0+(?:\.0*)?|\.0+)(?![\d.])"
+    r"|opacity\s*:\s*(?:0+(?:\.0*)?|\.0+)(?![\d.])")  # a value equal to zero: 0, 00, 0.0, .0, 0. ... (linear)
 _CSS_ESCAPE = re.compile(r"\\([0-9a-fA-F]{1,6})[ \t\r\n\f]?|\\(.)", re.DOTALL)
 
 

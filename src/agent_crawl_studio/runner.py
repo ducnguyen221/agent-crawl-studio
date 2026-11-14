@@ -10,6 +10,7 @@ the batch into a new job folder, one item after another, and ends every path (al
 
 import contextlib
 import dataclasses
+import hashlib
 import os
 import re
 import shutil
@@ -155,8 +156,9 @@ MEDIA_DEPS = ("engine_prefix", "spawn", "kill_tree", "scan", "poll", "environ", 
 EXTRACT_DEPS = ("extract_python", "extract_worker", "extract_job_limits", "extract_poll", "extract_sleep", "spawn",
                 "kill_tree")
 MARKDOWN_MIMES = frozenset({"text/markdown"})  # the one type the text artifact may have (FR21.2)
-CLEAR_TRIES = 10  # an item folder of an extraction child that will not go is tried again, 50 ms apart
-CLEAR_PAUSE = 0.05
+CLEAR_WAITS = (0.05, 0.1, 0.2, 0.4, 0.8, 1.6)  # an item folder that will not go is tried again after these waits...
+CLEAR_BUDGET = 3.0  # ... for at most this many seconds in all (the last wait is cut to fit)
+ITEM_FOLDER = re.compile(r"^[0-9]{4}(-[0-9]+)?$")
 
 
 def _stamp(moment):
@@ -272,6 +274,10 @@ class _Job:
         self.limits = request.limits_effective
         self.clock = deps.get("clock", time.monotonic)
         self.sleep = deps.get("sleep", time.sleep)  # the wait between two attempts of an item (FR14.2)
+        self.clear_sleep = deps.get("clear_sleep", time.sleep)  # the wait of the folder cleanup: never `sleep` above (a
+        self.clear_clock = deps.get("clear_clock", time.monotonic)  # test turns that off), and its own clock
+        self.stuck = set()  # the item folders that would not go, until the final sweep has them
+        self.log = None  # the run log, once the job has one (`_run`)
         self.now = deps.get("now") or (lambda: datetime.now(timezone.utc))
         self.attempt = 1  # the number of the attempt in hand, and which wait ran out if it was a TIMEOUT
         self.timeout_kind = None
@@ -412,7 +418,7 @@ class _Job:
                     if proxy_url is not None:
                         self.count_net(proxy.bytes_in)  # what came back through it, whatever way the item ended
             finally:
-                ytdlp.clear_item_dir(item_root, self.check)
+                self.clear_item(item_root)
 
     def egress_line(self, line):
         """logs/egress.log: one line per CONNECT the proxies saw, at most 10 000 lines a job, written under a lock;
@@ -628,7 +634,8 @@ class _Job:
             entry = self.entry(index, spec, "OUTPUT_PATH_BLOCKED", adapter=adapter)
         except OSError:  # the disk (the folders, the child's files), not the child
             entry = self.entry(index, spec, "OUTPUT_WRITE_FAILED", adapter=adapter)
-        except Exception:  # noqa: BLE001 - one item's surprise fails that item only (a Ctrl+C still passes through)
+        except Exception as exc:  # noqa: BLE001 - one item's surprise fails that item only (a Ctrl+C still passes through)
+            self.note_tree(exc)  # a tree that could not be emptied is still said, whatever else went wrong
             entry = self.entry(index, spec, "TOOL_FAILED", adapter=adapter)
         finally:
             self.clear_item(item_root)
@@ -637,26 +644,50 @@ class _Job:
                     os.remove(placed)
         return entry
 
-    def clear_item(self, item_root):
-        """Take the item folder away. The files of a child that was just ended can stay locked for a few milliseconds
-        (Windows lets go of the handles of a dead process a moment after it is gone), so a folder that is still there is
-        tried again, at most `CLEAR_TRIES` times, `CLEAR_PAUSE` apart (through `self.sleep`). It stops at once when
-        `check` refuses the folder (waiting changes nothing). A folder that is still there after that is left, as
-        `clear_item_dir` always does, and the job says so (`item_dir_not_removed`): it holds the text the child
-        extracted."""
-        for attempt in range(CLEAR_TRIES):
-            ytdlp.clear_item_dir(item_root, self.check)
+    def clear_item(self, item_root, patient=True):
+        """Take an item folder away, for the media and the extract branch alike. The files of a child that was just
+        ended can stay locked a little while (Windows lets go of the handles of a dead process a moment after it is
+        gone, and a scanner may hold them too), so a folder that is still there is tried again after the waits of
+        `CLEAR_WAITS`, for at most `CLEAR_BUDGET` seconds by `clear_clock`; the waits go through `clear_sleep`, which is
+        not the backoff `sleep`. It stops at once when `check` refuses the folder (waiting changes nothing); `patient`
+        False is one try. A folder still there after that is left, as `clear_item_dir` always does, and the job says
+        so (`item_dir_not_removed`, with the error numbers in the run log): it holds text that has no frame.
+        Returns True when the folder is gone."""
+        errors, started = [], self.clear_clock()
+        waits = iter(CLEAR_WAITS if patient else ())
+        while True:
+            ytdlp.clear_item_dir(item_root, self.check, errors=errors)
             if not os.path.lexists(item_root):
-                return
+                self.stuck.discard(item_root)
+                return True
             if self.check is not None:
                 try:
                     self.check(item_root)
                 except Exception:  # noqa: BLE001 - a refusal of any kind: another try would be refused too
                     break
-            if attempt + 1 < CLEAR_TRIES:
-                self.sleep(CLEAR_PAUSE)
+            wait, left = next(waits, None), CLEAR_BUDGET - (self.clear_clock() - started)
+            if wait is None or left <= 0:
+                break
+            self.clear_sleep(min(wait, left))
+        self.stuck.add(item_root)
         if "item_dir_not_removed" not in self.warnings:
             self.warnings.append("item_dir_not_removed")
+        _say_stuck(self.log, item_root, errors)
+        return False
+
+    def final_sweep(self):
+        """The last look at `.tmp/` before the manifest is closed: every item folder still there gets one more try
+        (handles may have been let go since its item ended). The warning stays only while a folder stays."""
+        tmp = os.path.join(self.job_dir, ".tmp")
+        try:
+            names = sorted(name for name in os.listdir(tmp) if ITEM_FOLDER.match(name))
+        except OSError:
+            names = []
+        for name in names:
+            self.clear_item(os.path.join(tmp, name), patient=False)
+        self.stuck = {root for root in self.stuck if os.path.lexists(root)}
+        if not self.stuck and "item_dir_not_removed" in self.warnings:
+            self.warnings.remove("item_dir_not_removed")
 
     def extract_result(self, index, spec, outcome, html, result, dirs):
         """The item entry for what the child gave: an error code, or the two artifacts (the text first)."""
@@ -669,6 +700,8 @@ class _Job:
                 self.timeout_kind = result.timeout_kind
             return self.entry(index, spec, result.code, adapter=adapter, reason=result.reason, hint=result.hint,
                               retryable=False)  # what went wrong in the extraction is final (FR19.3)
+        if _sha256_of(os.path.join(self.job_dir, html["path"])) != html["sha256"]:  # the child is dead: is the page as placed?
+            return self.entry(index, spec, "TOOL_FAILED", adapter=adapter, hint=HINTS["extract_failed"], retryable=False)
         item_id, redacted = "%04d" % index, outcome.final_url_redacted
         source = os.path.join(dirs.dl, "extract.md")  # in a folder only the core knows: the child cannot touch it
         with open(source, "x", encoding="utf-8", newline="\n") as out:
@@ -693,6 +726,26 @@ class _Job:
         entry["artifacts"] = [text, html]
         entry["untrusted"].update(manifest.clean_untrusted(result.meta))
         return entry
+
+
+def _say_stuck(log, item_root, errors):
+    """One line of the run log: the id of the folder and the error numbers, fixed words and no path."""
+    name = os.path.basename(item_root)
+    numbers = ",".join(str(number) for number in sorted(set(errors))) or "-"
+    if log is not None:
+        log.write("%s item_dir_not_removed winerror=%s" % (name if ITEM_FOLDER.match(name) else "?", numbers))
+
+
+def _sha256_of(path):
+    """The sha256 of a file, or None when it cannot be read (it then equals nothing)."""
+    digest = hashlib.sha256()
+    try:
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(chunk)
+    except OSError:
+        return None
+    return digest.hexdigest()
 
 
 def _undo_job(job_dir):
@@ -940,6 +993,7 @@ def _run(request, env, deps, policy, moment_of, state):
         return refusal
     job_dir, writer, mf, log = pieces
     job = state["job"] = _Job(request, deps, policy, writer, job_dir, _media_hosts(env), env, state.get("check"))
+    job.log = log  # the run log also tells which folder stayed, and why
     log.closers.append(job.close_egress_log)  # closed wherever the run log is: both ends have their Ctrl+C retries
     manifest_failed = False
     for index, spec in zip(state["indices"], request.urls):
@@ -961,6 +1015,10 @@ def _run(request, env, deps, policy, moment_of, state):
     if job.cancelled:  # an interrupted item may have left a finished file the manifest does not list
         writer.sweep()  # again: the handles of the interrupted frames are closed now, so a folder they held can go
         writer.reconcile(_listed(mf.doc))
+    try:
+        job.final_sweep()  # `.tmp/` once more, before the manifest is closed
+    except KeyboardInterrupt:
+        job.cancelled = True
     status = "failed" if (manifest_failed or job.timed_out) else schema.job_status(
         [item["status"] for item in mf.doc["items"]], cancelled=job.cancelled)
     error, extra = None, list(job.warnings)

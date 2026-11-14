@@ -351,20 +351,21 @@ def test_an_item_folder_that_stays_for_a_moment_is_tried_again_and_one_that_neve
     from agent_crawl_studio import ytdlp
     real, calls = ytdlp.clear_item_dir, []
 
-    def slow(root, check):
+    def slow(root, check, errors=None):
         calls.append(root)
         if len(calls) >= 3:  # the files of the dead child are let go on the third try
             real(root, check)
     monkeypatch.setattr(ytdlp, "clear_item_dir", slow)
-    monkeypatch.setattr(runner, "CLEAR_PAUSE", 0)
+    deps = {"spawn": sup.FakeSpawn(sup.good_effect), "clear_sleep": lambda seconds: None}
     with LocalServer() as server:
-        result, _ = go(world, server, ["/page/blog.html"], deps={"spawn": sup.FakeSpawn(sup.good_effect)})
+        result, _ = go(world, server, ["/page/blog.html"], deps=deps)
         assert result["items"][0]["status"] == "succeeded" and len(calls) == 3
         assert os.listdir(os.path.join(job_dir_of(world, result), ".tmp")) == []
         calls.clear()
-        monkeypatch.setattr(ytdlp, "clear_item_dir", lambda root, check: calls.append(root))  # never goes
-        result, _ = go(world, server, ["/page/blog.html"], deps={"spawn": sup.FakeSpawn(sup.good_effect)})
-    assert result["items"][0]["status"] == "succeeded" and len(calls) == runner.CLEAR_TRIES  # left, and no harm done
+        monkeypatch.setattr(ytdlp, "clear_item_dir", lambda root, check, errors=None: calls.append(root))  # never goes
+        result, _ = go(world, server, ["/page/blog.html"], deps=deps)
+    # left, and no harm done: the tries of the item, then the one of the final sweep
+    assert result["items"][0]["status"] == "succeeded" and len(calls) == len(runner.CLEAR_WAITS) + 1 + 1
     assert os.listdir(os.path.join(job_dir_of(world, result), ".tmp")) == ["0001"]
     monkeypatch.undo()
     ytdlp.clear_item_dir(os.path.join(job_dir_of(world, result), ".tmp", "0001"), None)

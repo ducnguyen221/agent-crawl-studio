@@ -176,12 +176,24 @@ def test_the_rfc_9309_html_page_extracts_to_two_artifacts_with_the_fixed_first_a
     assert "robots exclusion protocol" in body and "robots.txt" in body
 
 
+def longest_body_line(md_text):
+    """The longest line of the body of an `.md` artifact (between its fixed first and last lines), stripped and in
+    lower case. It is a line of the page's own text, so neither the title nor any other field of the manifest repeats
+    it; the check does not depend on a sentence chosen by hand."""
+    lines = md_text.splitlines()
+    body = [line.strip() for line in lines[2:-1] if not line.startswith(HEADER_TAG)]
+    return max(body, key=len, default="").lower()
+
+
 def test_the_text_of_the_page_is_only_in_the_md_file_not_in_stdout_or_the_manifest(extract_job):
     work, _code, result = extract_job
-    marker = "robots exclusion protocol"
-    assert marker not in json.dumps(result).lower()
+    md = (job_dir(work, result) / result["items"][0]["artifacts"][0]["path"]).read_text(encoding="utf-8")
+    marker = longest_body_line(md)
+    assert len(marker) >= 60 and marker in md.lower()  # first: the marker IS in the text of the .md file
     on_disk = (job_dir(work, result) / "manifest.json").read_text(encoding="utf-8").lower()
-    assert marker not in on_disk
+    for where in (json.dumps(result, ensure_ascii=False).lower(), on_disk):
+        for form in (marker, json.dumps(marker, ensure_ascii=False)[1:-1]):  # as it is, and as JSON would write it
+            assert form not in where
 
 
 # --- FR29.4: a positive case of `retry` on a two-item batch with the RFC 9309 PDF ---------------------------------
