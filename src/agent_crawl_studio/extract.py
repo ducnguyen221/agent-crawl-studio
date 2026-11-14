@@ -107,6 +107,10 @@ _LINE_MAX = 2000
 _MARK_RUN = 8  # more combining marks in a row are cut: the canonical ordering step of NFC is quadratic on a long run
 _LABEL = "[crawl-studio"
 _LABEL_ANYWHERE = re.compile(re.escape(_LABEL), re.IGNORECASE)
+_FRAME_WORDS = ("crawl-studio", "untrusted content")  # a line with one of these, once folded, looks like a frame line
+_LOOKALIKES = str.maketrans(
+    {"\u0430": "a", "\u0435": "e", "\u043e": "o", "\u0441": "c", "\u0440": "p", "\u0445": "x", "\u0443": "y",
+     **{cp: "-" for cp in list(range(0x2010, 0x2016)) + [0x2212, 0x00AD]}})  # Cyrillic and dashes that pass for Latin ones
 _tables = {}
 
 
@@ -175,6 +179,13 @@ def _escape_label(line, lead):
     return line
 
 
+def _looks_like_frame(piece):
+    """True when `piece`, folded (NFKC, case, the look-alikes of a small table), holds a word of the frame lines. The
+    same linear work for every line, whatever the characters."""
+    folded = unicodedata.normalize("NFKC", piece).casefold().translate(_LOOKALIKES)
+    return any(word in folded for word in _FRAME_WORDS)
+
+
 def clean_text(text):
     """Markdown from the engine made safe (FR20.3, FR20.8): invisible characters out, NFC, `<` written as `&lt;`,
     no link or image syntax, lines folded at 2 000 characters, the marker of the fixed first line (anywhere in a
@@ -197,7 +208,13 @@ def clean_text(text):
             line = _LABEL_ANYWHERE.sub(lambda found: "\\" + found.group(), line)
         for start in range(0, len(line), _LINE_MAX):  # then fold: a folded piece can open with the marker
             piece = line[start:start + _LINE_MAX]
-            out.append(_escape_label(piece, lead) if "[" in piece else piece)
+            before = piece
+            if "[" in piece:
+                piece = _escape_label(piece, lead)
+            if piece == before and ("\\" + _LABEL) not in piece.lower() and _looks_like_frame(piece):
+                rest = piece.lstrip(lead)  # look-alike letters, dashes or brackets: escaped at the same place
+                piece = piece[:len(piece) - len(rest)] + "\\" + rest
+            out.append(piece)
     return "\n".join(out).strip("\n")
 
 

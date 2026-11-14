@@ -165,14 +165,20 @@ def redact_log(text, secrets=()):
     return text
 
 
-def _drop_link(path):
+def _note(errors, exc):
+    """Keep the number of an error that stopped a removal (the Windows one when there is one): `errors` may be None."""
+    if errors is not None:
+        errors.append(getattr(exc, "winerror", None) or exc.errno)
+
+
+def _drop_link(path, errors=None):
     """Take away a link or junction itself (never what it points to)."""
     for remove in (os.rmdir, os.remove):
         try:
             remove(path)
             return
-        except OSError:
-            continue
+        except OSError as exc:
+            _note(errors, exc)
 
 
 def _is_reparse(path):
@@ -182,7 +188,14 @@ def _is_reparse(path):
         return False
 
 
-def _remove_tree(path):
+def _remove_one(remove, path, errors):
+    try:
+        remove(path)
+    except OSError as exc:
+        _note(errors, exc)
+
+
+def _remove_tree(path, errors=None):
     try:
         with os.scandir(path) as entries:
             found = [(entry.path, entry.is_dir(follow_symlinks=False)) for entry in entries]
@@ -190,36 +203,34 @@ def _remove_tree(path):
         return
     for child, is_dir in found:
         if _is_reparse(child):
-            _drop_link(child)
+            _drop_link(child, errors)
         elif is_dir:
-            _remove_tree(child)
-            with contextlib.suppress(OSError):
-                os.rmdir(child)
+            _remove_tree(child, errors)
+            _remove_one(os.rmdir, child, errors)
         else:
-            with contextlib.suppress(OSError):
-                os.remove(child)
+            _remove_one(os.remove, child, errors)
 
 
-def clear_item_dir(root, check):
+def clear_item_dir(root, check, errors=None):
     """Remove `<job>/.tmp/<id>/` and all of it (FR10.5) without ever following a reparse point: a link in the
     place of the folder, or inside it, is removed as a link and what it points to is left alone. `check(path)`
     may veto (PathBlocked or any error: the folder is not touched). Whatever cannot be removed (a file still
-    open) is left; this never raises for that."""
+    open) is left; this never raises for that. `errors` (a list) is given the number of each error that stopped
+    a removal, so the caller can say why a folder stayed."""
     try:
         os.lstat(root)
     except OSError:
         return
     if _is_reparse(root):
-        _drop_link(root)
+        _drop_link(root, errors)
         return
     if check is not None:
         try:
             check(root)
         except Exception:  # noqa: BLE001 - PathBlocked or OSError: do not touch it
             return
-    _remove_tree(root)
-    with contextlib.suppress(OSError):
-        os.rmdir(root)
+    _remove_tree(root, errors)
+    _remove_one(os.rmdir, root, errors)
 
 
 class OutputError(Exception):

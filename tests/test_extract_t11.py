@@ -142,38 +142,39 @@ def test_text_that_fits_exactly_is_not_reported_truncated(tmp_path):
     assert extract.read_result(str(tmp_path / "out.json"), 100, None)["truncated"] is False
 
 
-# --- runner.clear_item (python RF3) -----------------------------------------------------------------------------
+# --- runner.clear_item (python RF3; TK16: its own wait and clock, a time limit) -----------------------------------
 def fake_job(tmp_path, check=None):
     sleeps = []
-    job = types.SimpleNamespace(check=check, sleep=sleeps.append, warnings=[])
+    job = types.SimpleNamespace(check=check, clear_sleep=sleeps.append, clear_clock=lambda: 0.0, warnings=[], stuck=set(),
+                                log=None)
     root = tmp_path / "0001"
     root.mkdir()
     (root / "result.json").write_text("{}", encoding="utf-8")
     return job, sleeps, str(root)
 
 
-def test_a_folder_that_never_goes_is_warned_about_once_and_the_pauses_use_the_injected_sleep(tmp_path, monkeypatch):
+def test_a_folder_that_never_goes_is_warned_about_once_and_the_pauses_use_the_injected_clear_sleep(tmp_path, monkeypatch):
     job, sleeps, root = fake_job(tmp_path)
     calls = []
-    monkeypatch.setattr(ytdlp, "clear_item_dir", lambda path, check: calls.append(path))  # never goes
+    monkeypatch.setattr(ytdlp, "clear_item_dir", lambda path, check, errors=None: calls.append(path))  # never goes
     runner._Job.clear_item(job, root)
     runner._Job.clear_item(job, root)
-    assert len(calls) == 2 * runner.CLEAR_TRIES
+    assert len(calls) == 2 * (len(runner.CLEAR_WAITS) + 1)  # the clock of this stand-in never moves: every wait is used
     assert job.warnings == ["item_dir_not_removed"]
-    assert sleeps == [runner.CLEAR_PAUSE] * (2 * (runner.CLEAR_TRIES - 1))
+    assert sleeps == list(runner.CLEAR_WAITS) * 2
 
 
 def test_a_folder_that_goes_on_the_second_try_gives_no_warning(tmp_path, monkeypatch):
     job, sleeps, root = fake_job(tmp_path)
     real, calls = ytdlp.clear_item_dir, []
 
-    def second(path, check):
+    def second(path, check, errors=None):
         calls.append(path)
         if len(calls) == 2:
             real(path, check)
     monkeypatch.setattr(ytdlp, "clear_item_dir", second)
     runner._Job.clear_item(job, root)
-    assert len(calls) == 2 and job.warnings == [] and sleeps == [runner.CLEAR_PAUSE]
+    assert len(calls) == 2 and job.warnings == [] and sleeps == [runner.CLEAR_WAITS[0]]
 
 
 def test_a_check_that_refuses_stops_the_tries_at_once_and_warns(tmp_path, monkeypatch):
@@ -181,17 +182,17 @@ def test_a_check_that_refuses_stops_the_tries_at_once_and_warns(tmp_path, monkey
         raise PermissionError(path)
     job, sleeps, root = fake_job(tmp_path, check=refuse)
     calls = []
-    monkeypatch.setattr(ytdlp, "clear_item_dir", lambda path, check: calls.append(path))
+    monkeypatch.setattr(ytdlp, "clear_item_dir", lambda path, check, errors=None: calls.append(path))
     runner._Job.clear_item(job, root)
     assert len(calls) == 1 and sleeps == [] and job.warnings == ["item_dir_not_removed"]
 
 
 def test_the_warning_reaches_the_result_of_a_job_run(world, monkeypatch):
     from test_extract_run import LocalServer, go
-    monkeypatch.setattr(ytdlp, "clear_item_dir", lambda root, check: None)  # the folder never goes
-    monkeypatch.setattr(runner, "CLEAR_PAUSE", 0)
+    monkeypatch.setattr(ytdlp, "clear_item_dir", lambda root, check, errors=None: None)  # the folder never goes
     with LocalServer() as server:
-        result, _ = go(world, server, ["/page/blog.html"], deps={"spawn": sup.FakeSpawn(sup.good_effect)})
+        result, _ = go(world, server, ["/page/blog.html"], deps={"spawn": sup.FakeSpawn(sup.good_effect),
+                                                                  "clear_sleep": lambda seconds: None})
     assert result["items"][0]["status"] == "succeeded" and result["warnings"].count("item_dir_not_removed") == 1
 
 
