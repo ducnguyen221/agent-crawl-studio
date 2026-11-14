@@ -9,7 +9,7 @@
       "source": "./",
       "description": "Safe web and media crawling for agents: plan, fetch and extract with a manifest and security policy.",
       "version": "0.2.2",
-      "license": "NONE",
+      "license": "MIT",
       "author": {
         "name": "Nguyễn Quang Đức"
       }
