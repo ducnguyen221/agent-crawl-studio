@@ -77,12 +77,51 @@ def test_plan_reports_expect_and_keeps_duplicates_as_separate_items(world):
     assert [i["id"] for i in result["items"]] == ["0001", "0002"]
 
 
-@pytest.mark.parametrize("mode", ["media", "gallery", "crawl"])
+@pytest.mark.parametrize("mode", ["gallery", "crawl"])
 def test_plan_of_an_unsupported_mode_blocks_allowed_urls_with_unsupported_source(world, mode):
     result = run_plan(world, [PDF, "http://127.0.0.1/"], mode=mode)
     first, second = result["items"]
     assert first["decision"] == "blocked" and first["adapter"] is None and first["error"]["code"] == "UNSUPPORTED_SOURCE"
     assert second["error"]["code"] == "URL_BLOCKED", "a blocked URL keeps its own code"
+
+
+YOUTUBE = "https://www.youtube.com/watch?v=jNQXAC9IVRw"
+
+
+def tools(missing=()):
+    paths = {"ffmpeg": "C:/tools/ffmpeg.exe", "node": "C:/tools/node.exe"}
+    return {"which": lambda name, path=None: None if name in missing else paths.get(name),
+            "version_of": lambda name: "2026.1.1"}
+
+
+@pytest.mark.parametrize("mode", ["media", "auto"])
+def test_plan_media_allowed(world, no_socket, mode):
+    result = run_plan(world, [YOUTUBE, PDF], mode=mode, deps=tools())
+    first, second = result["items"]
+    assert first["adapter"] == "yt-dlp" and first["decision"] == "allow" and "error" not in first
+    expected = ("direct-http", "allow") if mode == "auto" else (None, "blocked")
+    assert (second["adapter"], second["decision"]) == expected
+    assert result["network_checked"] is False
+
+
+def test_plan_media_outside_the_allowlist_is_url_blocked(world, no_socket):
+    result = run_plan(world, [PDF], mode="media", deps=tools())
+    assert result["items"][0]["decision"] == "blocked" and result["items"][0]["error"]["code"] == "URL_BLOCKED"
+
+
+@pytest.mark.parametrize("missing", ["ffmpeg", "node"])
+def test_plan_media_missing_tool(world, no_socket, missing):
+    result = run_plan(world, [YOUTUBE, PDF], mode="auto", deps=tools(missing=(missing,)))
+    first, second = result["items"]
+    assert first["decision"] == "blocked" and first["adapter"] == "yt-dlp"
+    assert first["error"]["code"] == "DEPENDENCY_MISSING" and first["error"]["hint"] == errors.HINTS["tools_missing"]
+    assert second["decision"] == "allow", "a direct item of the same batch still runs"
+
+
+def test_plan_media_missing_package(world, no_socket):
+    deps = tools()
+    deps["version_of"] = lambda name: (_ for _ in ()).throw(LookupError(name))
+    assert run_plan(world, [YOUTUBE], mode="media", deps=deps)["items"][0]["error"]["code"] == "DEPENDENCY_MISSING"
 
 
 def test_plan_uses_the_injected_policy_only_through_deps(world):
@@ -99,7 +138,7 @@ def test_plan_output_for_the_default_place(world):
     assert output["parent"] == os.path.join(world["work"], "jobs")
     assert output["job_dir_template"] == os.path.join(world["work"], "jobs", "<job_id>")
     assert result["limits_effective"] == limits.DEFAULTS
-    assert sorted(result["warnings"]) == ["concurrency_not_applied", "retries_not_applied"]
+    assert result["warnings"] == ["concurrency_not_applied"]
 
 
 def test_plan_with_a_relative_output_dir(world):
@@ -201,3 +240,11 @@ def test_a_request_path_with_dot_dot_is_not_mistaken_for_a_device(tmp_path):
 
 def test_validate_plan_flags_an_item_that_is_not_an_object(world):
     assert schema.validate_plan(dict(run_plan(world, [PDF]), items=["x"])) == ["items[0]"]
+
+def test_plan_looks_for_the_tools_once_for_many_media_items(world, no_socket):
+    calls = []
+    deps = tools()
+    deps["version_of"] = lambda name: calls.append(name) or "1"
+    result = run_plan(world, [YOUTUBE, YOUTUBE + "&t=2"], mode="media", deps=deps)
+    assert [i["decision"] for i in result["items"]] == ["allow", "allow"] and calls == ["yt-dlp"]
+

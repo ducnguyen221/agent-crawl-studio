@@ -48,7 +48,7 @@ ITEM_STATUS_FOR = {
     "ROBOTS_DISALLOWED": "blocked", "CANCELLED": "cancelled",
     "AUTH_REQUIRED": "failed", "RATE_LIMITED": "failed", "NETWORK_ERROR": "failed", "SIZE_LIMIT": "failed",
     "UNSUPPORTED_SOURCE": "failed", "TOOL_FAILED": "failed", "CONTENT_MISMATCH": "failed", "TIMEOUT": "failed",
-    "OUTPUT_WRITE_FAILED": "failed",
+    "OUTPUT_WRITE_FAILED": "failed", "DEPENDENCY_MISSING": "failed",
 }
 
 # Exit code when the code rejects the whole request/command; None: decided by the job result (JOB_EXIT).
@@ -69,7 +69,14 @@ REASONS = (
     "http_status", "truncated_body", "content_encoding_unsupported", "forbidden", "other",
 )
 
-HINT_CODES = ("unknown_key", "wrong_type", "out_of_range")
+HINT_CODES = ("unknown_key", "wrong_type", "out_of_range", "nothing_to_retry")
+
+# Fixed `hint` texts of item errors (never a piece of an engine's output).
+HINTS = {
+    "tools_missing": "install ffmpeg, node and the core venv; nothing was installed",
+    "job_object_unavailable": "the process could not be contained; it was stopped",
+    "proxy_unavailable": "the local egress proxy could not start; nothing was downloaded",
+}
 
 
 class ContractError(ValueError):

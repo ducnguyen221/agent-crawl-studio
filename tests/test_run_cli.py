@@ -76,4 +76,4 @@ def test_run_output_never_carries_library_noise(tmp_path, capsys):
     rc, text = run_main(tmp_path, run_fn=run_fn)
     captured = capsys.readouterr()
     assert rc == 0 and one_object(text)["status"] == "succeeded"
-    assert "stray print" in captured.err and "library chatter" in captured.err and captured.out == ""
+    assert "stray print" in captured.err and "UserWarning" in captured.err and "library chatter" not in captured.err and captured.out == ""  # FR16.6

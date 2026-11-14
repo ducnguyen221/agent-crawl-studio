@@ -37,7 +37,8 @@ def test_environment_is_only_touched_through_the_command_line_entry_point():
 
 
 def test_command_line_accepts_only_the_documented_options():
-    assert cli.COMMANDS == {"capabilities": (), "plan": ("--request",), "run": ("--request",)}
+    assert cli.COMMANDS == {"capabilities": (), "plan": ("--request",), "run": ("--request",),
+                            "retry": ("--manifest", "--request")}
 
 
 def test_no_source_file_names_a_policy_switch():

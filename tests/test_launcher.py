@@ -52,3 +52,21 @@ def test_resolve_returns_nonexistent_python(tmp_path):
     rt.mkdir(parents=True)
     (rt / "opcos-runtime.ps1").write_text("Write-Output 'C:\\definitely\\missing\\python.exe'\nexit 0\n", encoding="utf-8")
     check_one_json(run_launcher(tmp_path, "capabilities"))
+
+
+def test_resolve_that_writes_to_stderr_but_exits_0_with_a_real_python_runs_the_command(tmp_path):
+    """SPR-03 FR16.1: a stderr line from `opcos-runtime resolve` (a native tool's noise) must not turn into
+    DEPENDENCY_MISSING under Windows PowerShell 5.1 when the exit code is 0 and the printed Python exists."""
+    import sys
+
+    rt = tmp_path / "system" / "operations" / "runtime"
+    rt.mkdir(parents=True)
+    (rt / "opcos-runtime.ps1").write_text(
+        "& cmd.exe /c 'echo noise on stderr 1>&2'\nWrite-Output '%s'\nexit 0\n" % sys.executable, encoding="utf-8")
+    proc = run_launcher(tmp_path, "capabilities")
+    assert proc.returncode == 0, proc.stderr
+    lines = [l for l in proc.stdout.splitlines() if l.strip()]
+    assert len(lines) == 1
+    obj = json.loads(lines[0])
+    assert obj.get("error", {}).get("code") != "DEPENDENCY_MISSING"
+    assert obj.get("venv", {}).get("status") != "missing"

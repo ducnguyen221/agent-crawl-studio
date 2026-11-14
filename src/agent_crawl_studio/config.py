@@ -8,11 +8,10 @@ import json
 import os
 from dataclasses import dataclass, field
 
-from . import capabilities
+from . import capabilities, urlpolicy
 
 CONFIG_KEYS = ("output_roots", "media_host_allowlist")
-# `media_host_allowlist` of a user's config.json is read and validated, but nothing acts on it until SPR-03 (media
-# through the core); the smoke script uses this default tuple.
+# `media_host_allowlist` (user's config.json or this default tuple) decides which hosts the router sends to yt-dlp.
 DEFAULT_MEDIA_HOSTS = ("youtube.com", "youtu.be", "vimeo.com", "soundcloud.com", "tiktok.com")
 MAX_CONFIG_BYTES = 1024 * 1024
 FILE_NAME = "config.json"
@@ -35,6 +34,21 @@ def opcos_root(env):
     if not base and env.get("USERPROFILE"):
         base = os.path.join(env["USERPROFILE"], "OpcOS")
     return base or None
+
+
+def normalize_media_host(entry):
+    """An allowlist line as a plain lower-case ASCII host (one leading and one trailing dot dropped), or None
+    when it is not one: it must pass the host rules of `urlpolicy`, have at least two labels and not be an IP."""
+    if not isinstance(entry, str) or any(ch in entry for ch in "/?#@:%"):
+        return None
+    text = entry.strip()
+    text = text[1:] if text.startswith(".") else text
+    text = text[:-1] if text.endswith(".") else text
+    try:
+        norm = urlpolicy.check_url("https://%s/" % text)
+    except urlpolicy.Blocked:
+        return None
+    return None if norm.is_ip or "." not in norm.host else norm.host
 
 
 def _pairs(pairs):
@@ -98,5 +112,8 @@ def load_config(env):
                 continue
             if resolved not in roots:
                 roots.append(resolved)
-        hosts = tuple(doc["media_host_allowlist"])
+        kept = [normalize_media_host(entry) for entry in doc["media_host_allowlist"]]
+        if None in kept:
+            warnings.append("media_host_ignored")
+        hosts = tuple(host for host in dict.fromkeys(kept) if host)
     return Config(work, roots, hosts, warnings)

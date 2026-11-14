@@ -4,12 +4,13 @@ Every failure is a ContractError whose `path` names an object of OUR contract an
 unknown_key / wrong_type / out_of_range: no user key name or value is ever copied into it."""
 
 import json
+import re
 import secrets
 from collections import namedtuple
 from dataclasses import dataclass, field
 
 from . import limits as limits_mod
-from .errors import ContractError
+from .errors import JOB_EXIT, ContractError
 
 SCHEMA_VERSION = 1
 MAX_REQUEST_BYTES = 1024 * 1024
@@ -151,6 +152,9 @@ def job_status(item_statuses, cancelled=False):
     return "failed"
 
 
+JOB_ID = re.compile(r"[0-9]{8}-[0-9]{6}-[0-9a-f]{6}")
+
+
 def new_job_id(now, token=None):
     """YYYYMMDD-HHMMSS-<6 lowercase hex>."""
     return now.strftime("%Y%m%d-%H%M%S") + "-" + (token if token is not None else secrets.token_hex(3))
@@ -184,12 +188,21 @@ def validate_result(obj):
     if not isinstance(obj, dict):
         return ["$"]
     problems = [key for key in RESULT_KEYS if key not in obj]
+    if "retry_of" in obj and not (isinstance(obj["retry_of"], str) and JOB_ID.fullmatch(obj["retry_of"])):
+        problems.append("retry_of")  # FR15.5: the id of the job that was tried again
+    if obj.get("status") is not None and not (isinstance(obj["status"], str) and obj["status"] in JOB_EXIT):
+        problems.append("status")
+    if obj.get("counts") is not None and not isinstance(obj["counts"], dict):  # a text or a list is not a count table
+        problems.append("counts")
     if isinstance(obj.get("items"), list):
         for index, item in enumerate(obj["items"]):
             if not isinstance(item, dict):
                 problems.append("items[%d]" % index)
                 continue
             problems += ["items[%d].%s" % (index, key) for key in RESULT_ITEM_KEYS if key not in item]
+            attempts = item.get("attempts")
+            if "attempts" in item and (isinstance(attempts, bool) or not isinstance(attempts, int) or attempts < 1):
+                problems.append("items[%d].attempts" % index)  # FR14.2: a whole number, 1 or more, when present
         counts = obj.get("counts")
         if (obj.get("status") is not None and obj.get("job_id") is not None and isinstance(counts, dict)
                 and "total" in counts and len(obj["items"]) != counts["total"]):

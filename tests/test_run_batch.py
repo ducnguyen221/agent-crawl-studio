@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from agent_crawl_studio import errors, netfetch, outroot, runner, schema
+from agent_crawl_studio import errors, netfetch, outroot, runner, schema, urlpolicy
 
 from test_netfetch import LOOP, Resolver, policy_for, server  # noqa: F401
 
@@ -162,8 +162,8 @@ def test_job_timeout_fails_the_running_item_and_every_later_one_and_the_job_even
     assert result["items"][1]["error"]["retryable"] is True
 
 
-def test_media_mode_makes_every_item_unsupported_without_any_network(world, server, no_socket):
-    result, code = go(world, server, ["https://www.youtube.com/watch?v=abc", "https://vimeo.com/1"], mode="media")
+def test_gallery_mode_makes_every_item_unsupported_without_any_network(world, server, no_socket):
+    result, code = go(world, server, ["https://www.youtube.com/watch?v=abc", "https://vimeo.com/1"], mode="gallery")
     assert code == 1 and result["status"] == "failed"
     for entry in result["items"]:
         assert entry["status"] == "failed" and entry["adapter"] is None and entry["error"]["code"] == "UNSUPPORTED_SOURCE"

@@ -247,7 +247,7 @@ def test_a_blocked_run_log_stops_logging_but_not_the_job(tmp_path):
 
 
 def test_control_characters_never_reach_a_log_line(world, server, monkeypatch):
-    monkeypatch.setattr(runner.urlpolicy, "redact", lambda url: "http://a.example/x\r\nFAKE 9999 ok -‮")
+    monkeypatch.setattr(runner.urlpolicy, "redact", lambda url, norm=None: "http://a.example/x\r\nFAKE 9999 ok -‮")
     result, _ = go(world, server, [server.url("/ok")] * 2)
     text = open(os.path.join(job_dir_of(world, result), "logs", "run.log"), encoding="utf-8", newline="").read()
     assert text.count("\n") == 2 and "\r" not in text and "‮" not in text

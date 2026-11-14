@@ -262,7 +262,8 @@ def test_library_warnings_and_logging_never_reach_stdout(tmp_path, capsys):
 
 
 def test_capabilities_still_works_and_other_subcommands_are_not_added(tmp_path):
-    assert cli.COMMANDS == {"capabilities": (), "plan": ("--request",), "run": ("--request",)}
+    assert cli.COMMANDS == {"capabilities": (), "plan": ("--request",), "run": ("--request",),
+                            "retry": ("--manifest", "--request")}
     rc, text = run_cli(["capabilities"], tmp_path, build=lambda *a, **k: {"schema_version": 1, "ok": True})
     assert rc == 0 and one_object(text)["ok"] is True
 
