@@ -39,6 +39,10 @@ The core venv is pinned in `requirements/core.txt` and `locks/core-windows.txt`.
 
 Use the skills from this checkout with an agent that supports skill directories. For Claude-compatible plugin tooling, add the local marketplace `.claude-plugin/marketplace.json` and install `agent-crawl-studio@agent-crawl-studio`. Codex-compatible metadata is in `.codex-plugin/plugin.json`. Installation and routing across harnesses are not validated by the scaffold.
 
+## Install through OpcOS
+
+This plugin is installed with the OpcOS tasks `register-marketplace.ps1 -Tool claude -Marketplace agent-crawl-studio` and `install-plugin.ps1 -Name agent-crawl-studio -Tool claude -Marketplace agent-crawl-studio`, after the owner approves it; nothing installs itself. Remove it with `claude plugin uninstall agent-crawl-studio@agent-crawl-studio`, then `claude plugin marketplace remove agent-crawl-studio`, after removing its registry entry.
+
 ## Verify
 
 Run `python -X utf8 -m pytest tests -q -p no:cacheprovider --cov=agent_crawl_studio --cov-branch` with the system Python (needs `pytest` and `pytest-cov`; set `PYTHONDONTWRITEBYTECODE=1`). Tests inject every collaborator, touch no real network (unless you pass `--run-network`, see below) and create no `.venv` in the checkout; the loopback fixture server is the only socket.

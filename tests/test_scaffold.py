@@ -63,5 +63,22 @@ class ScaffoldTests(unittest.TestCase):
                 self.assertTrue((path.parent / link).exists(), "%s -> %s" % (path.relative_to(ROOT), link))
 
 
+    def test_manifest_has_no_placeholder_email(self):
+        author = read_json(".claude-plugin/plugin.json").get("author", {})
+        self.assertNotIn("email", author)
+
+    def test_the_four_versions_match(self):
+        init = (ROOT / "src/agent_crawl_studio/__init__.py").read_text(encoding="utf-8")
+        found = re.search(r'__version__\s*=\s*"([^"]+)"', init)
+        self.assertIsNotNone(found)
+        versions = {found.group(1)}
+        for rel in MANIFESTS:
+            data = read_json(rel)
+            if rel.endswith("marketplace.json"):
+                data = data["plugins"][0]
+            versions.add(data["version"])
+        self.assertEqual(versions, {"0.2.1"})
+
+
 if __name__ == "__main__":
     unittest.main()
