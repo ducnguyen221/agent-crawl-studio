@@ -2,8 +2,7 @@
 
 Safe web and media crawling for agents: plan, fetch and extract with a manifest and security policy.
 
-**Incubating build (bản ươm), not a release.** Private, local git only, no remote. SPR-01 delivered the skeleton (pinned engine venv installed by `opcos-runtime ensure`, `capabilities`, a download smoke test), SPR-02 the `plan` and `run` core, SPR-03 media download with yt-dlp, cancellation, retries and `retry`. SPR-04 added `extract` (clean, untrusted markdown of a static page), the `crawl-studio` skill, and the MVP acceptance run. Fill in `LICENSE`, review every file for private data, and only then consider publishing.
-
+**Early development (bản ươm), MVP version 0.2.0 — not a stable release; the API and the JSON contract may still change.** SPR-01 delivered the skeleton (pinned engine venv installed by `opcos-runtime ensure`, `capabilities`, a download smoke test), SPR-02 the `plan` and `run` core, SPR-03 media download with yt-dlp, cancellation, retries and `retry`. SPR-04 added `extract` (clean, untrusted markdown of a static page), the `crawl-studio` skill, and the MVP acceptance run.
 ## Layout
 
 - `skills/crawl-studio/SKILL.md` is the skill of this plugin (when to use it, the six-step workflow, the request cheat-sheet, how to read a manifest, the safety rules); `skills/crawl-studio/references/contract.md` and `errors.md` hold the request/result contract and the table of error codes.
@@ -49,4 +48,4 @@ Tests marked `network` need the real Internet and are `NOT_RUN` (a skip) unless 
 
 ## License
 
-See `LICENSE` (NONE). Copyright (c) 2026 Nguyễn Quang Đức.
+Released under the MIT License, see `LICENSE`. Copyright (c) 2026 Nguyễn Quang Đức.
