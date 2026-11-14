@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "mode": "auto",
+  "urls": [
+    {"url": "https://www.rfc-editor.org/rfc/rfc9309.pdf"},
+    {"url": "https://www.w3.org/Graphics/PNG/alphatest.png"},
+    {"url": "https://www.youtube.com/watch?v=jNQXAC9IVRw"},
+    {"url": "https://www.rfc-editor.org/rfc/rfc99999.txt"}
+  ]
+}

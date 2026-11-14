@@ -166,7 +166,7 @@ def test_unknown_code_falls_back_to_INTERNAL_ERROR():
 def test_reason_table_is_closed():
     assert tuple(errors.REASONS) == (
         "tls_verify_failed", "connection_refused", "connection_reset", "dns_failed", "network_unreachable",
-        "http_status", "truncated_body", "content_encoding_unsupported", "forbidden", "other")
+        "http_status", "truncated_body", "content_encoding_unsupported", "forbidden", "not_html", "no_text", "other")
 
 
 def test_reason_outside_the_table_becomes_other_and_text_is_never_copied():
@@ -211,5 +211,7 @@ def test_dependency_missing_is_also_an_item_status_and_has_fixed_hints():
         "tools_missing": "install ffmpeg, node and the core venv; nothing was installed",
         "job_object_unavailable": "the process could not be contained; it was stopped",
         "proxy_unavailable": "the local egress proxy could not start; nothing was downloaded",
+        "extract_failed": "the page could not be turned into text; details were not printed",
+        "extract_engine_missing": "run opcos-runtime ensure for this repo; nothing was installed",
     }
     assert all(text.isascii() for text in errors.HINTS.values())

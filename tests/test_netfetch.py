@@ -192,7 +192,7 @@ def test_build_client_maps_the_timeouts_from_the_limits(nf, server):
 def test_the_interface_has_exactly_the_documented_parameters_and_no_switch(nf):
     assert list(inspect.signature(nf.build_client).parameters) == ["policy", "timeouts", "transport"]
     assert list(inspect.signature(nf.fetch_item).parameters) == [
-        "url", "expect", "limits", "sink", "policy", "client", "total_remaining", "clock", "job_deadline"]
+        "url", "expect", "limits", "sink", "policy", "client", "total_remaining", "clock", "job_deadline", "network_room"]
     assert list(inspect.signature(nf.PinnedBackend).parameters) == ["policy", "clock"]
     assert list(inspect.signature(nf.PinnedTransport).parameters) == ["policy", "limits", "network_backend"]
 

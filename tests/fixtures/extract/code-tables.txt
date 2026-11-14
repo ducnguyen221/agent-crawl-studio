@@ -1,0 +1,29 @@
+Reference for the sample tool settings
+Every option below can be set in the file or on the command line.
+option default meaning
+timeout 30 seconds before a request is cancelled
+retries 3 attempts after a temporary failure
+limit 100 largest number of items in one run
+mode fast fast or careful processing
+output result.json file that receives the answer
+verbose off print every step to the console
+cache on keep a copy of each reply on disk
+format json json or plain text answer
+settings = load_settings(path)
+if settings.retries > 3:
+    settings.retries = 3
+for item in queue(limit=settings.limit):
+    result = process(item, mode=settings.mode)
+    write(result, settings.output)
+code name action
+E1 NoFile check the path
+E2 Busy retry later
+E3 TooLarge lower the limit
+E4 Refused ask the owner
+def retry(call, times):
+    for n in range(times):
+        try:
+            return call()
+        except TemporaryError:
+            wait(n * 2)
+    raise GiveUp()

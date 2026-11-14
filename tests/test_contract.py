@@ -44,7 +44,7 @@ def test_full_request_with_object_urls_and_limits():
     assert req.limits_effective["max_items"] == 5 and req.limits_effective["connect_timeout"] == 2.5
 
 
-@pytest.mark.parametrize("mode", ["auto", "direct", "media", "gallery", "crawl"])
+@pytest.mark.parametrize("mode", ["auto", "direct", "media", "gallery", "crawl", "extract"])
 def test_every_documented_mode_is_valid_grammar(mode):
     assert schema.parse_request(dumps(base(mode=mode))).mode == mode
 
@@ -82,6 +82,9 @@ INVALID = [
     ("url item url is not a string", dumps(base(urls=[{"url": 5}])), "wrong_type", "$.urls[0]"),
     ("expect unknown value", dumps(base(urls=[{"url": URL, "expect": "weird"}])), "out_of_range", "$.urls[0]"),
     ("expect not a string", dumps(base(urls=[{"url": URL, "expect": 3}])), "wrong_type", "$.urls[0]"),
+    ("extract mode with expect binary", dumps(base(mode="extract", urls=[URL, {"url": URL, "expect": "binary"}])), "out_of_range", "$.urls[1]"),
+    ("extract_timeout over the cap", dumps(base(limits={"extract_timeout": 301})), "out_of_range", "$.limits.extract_timeout"),
+    ("max_extract_chars fractional", dumps(base(limits={"max_extract_chars": 1.5})), "wrong_type", "$.limits.max_extract_chars"),
     ("mode unknown", dumps(base(mode="weird")), "out_of_range", "$.mode"),
     ("mode not a string", dumps(base(mode=5)), "wrong_type", "$.mode"),
     ("output_dir not a string", dumps(base(output_dir=5)), "wrong_type", "$.output_dir"),

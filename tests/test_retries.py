@@ -66,6 +66,15 @@ SHOULD = [  # (code, retryable, adapter, timeout_kind, tried again?)
     ("TIMEOUT", True, "yt-dlp", "connect", True),             # the proxy's connect timeout
     ("TIMEOUT", False, "yt-dlp", "item", False),
     ("TIMEOUT", False, "yt-dlp", "job", False),
+    ("NETWORK_ERROR", True, "extract", None, True),           # SPR-04 FR18.7: the download step is a direct download
+    ("RATE_LIMITED", True, "extract", None, True),
+    ("TIMEOUT", True, "extract", "connect", True),
+    ("TIMEOUT", True, "extract", "idle", True),
+    ("TIMEOUT", False, "extract", "extract", False),          # the extraction ran out of time: final (FR19.3)
+    ("TIMEOUT", False, "extract", "job", False),
+    ("TOOL_FAILED", False, "extract", None, False),
+    ("CONTENT_MISMATCH", False, "extract", None, False),
+    ("DEPENDENCY_MISSING", False, "extract", None, False),
     ("URL_BLOCKED", False, "direct-http", None, False),
     ("REDIRECT_BLOCKED", False, "direct-http", None, False),
     ("AUTH_REQUIRED", False, "direct-http", None, False),

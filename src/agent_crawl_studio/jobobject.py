@@ -1,11 +1,11 @@
 """A Windows Job Object around the engine's whole process tree (SPEC FR12.1-FR12.3, DN9).
 
 The engine (python -> python -> node/ffmpeg ...) runs in its own job with KILL_ON_JOB_CLOSE, so ending the job -
-or the core dying with no chance to run a handler - ends every process in the tree. The process is made and put
-in the job inside a helper thread, so a Ctrl+C that arrives in the middle cannot leave a running process outside
-the job; the core also joins a job of its own once (a net: a child made in the instant before its assignment is
-born inside the core's job and dies with the core). ctypes only (standard library); no BREAKAWAY flag is ever set,
-so nothing the engine starts can leave the job."""
+or the core dying with no chance to run a handler - ends every process in the tree. The process is made suspended,
+put in the job (limits set first), and only then let run - so not one statement of it runs outside the job (SPEC
+FR22.1) - all inside a helper thread, so a Ctrl+C that arrives in the middle cannot leave a process outside the job;
+the core also joins a job of its own once (a net behind the per-item job). ctypes only (standard library); no
+BREAKAWAY flag is ever set, so nothing the engine starts can leave the job."""
 
 import ctypes
 import os
@@ -13,17 +13,30 @@ import subprocess
 import sys
 import threading
 import time
+from collections import namedtuple
 from ctypes import wintypes
 
+CREATE_SUSPENDED = 0x00000004
 CREATE_NEW_PROCESS_GROUP = 0x00000200
 CREATE_NO_WINDOW = 0x08000000
 
 _PROCESS_TERMINATE = 0x0001
 _PROCESS_SET_QUOTA = 0x0100
+_PROCESS_SUSPEND_RESUME = 0x0800
 _SYNCHRONIZE = 0x00100000
 _INFO_BASIC_ACCOUNTING = 1
 _INFO_EXTENDED_LIMIT = 9
 _KILL_ON_JOB_CLOSE = 0x2000
+_LIMIT_ACTIVE_PROCESS = 0x0008
+_LIMIT_JOB_MEMORY = 0x0200
+MiB = 2 ** 20
+
+JobLimits = namedtuple("JobLimits", "memory_bytes active_processes", defaults=(None, None))
+JobLimits.__doc__ = ("What a job may use: `memory_bytes` is the memory of the whole job (committed), "
+                     "`active_processes` the number of processes alive in it at once; None means no limit.")
+# The job of an extraction child (PLAN TK2/TK3 `Phan quyet`): 512 MiB = 1.5 x the peak of the chosen engine on the
+# largest page the core lets in, and N = 2 processes (the venv's `python.exe` stand-in and the interpreter behind it).
+EXTRACT_JOB_LIMITS = JobLimits(memory_bytes=512 * MiB, active_processes=2)
 
 
 class JobObjectError(OSError):
@@ -81,6 +94,10 @@ class _Kernel:
         k32.TerminateJobObject.restype = wintypes.BOOL
         k32.CloseHandle.argtypes = (wintypes.HANDLE,)
         k32.CloseHandle.restype = wintypes.BOOL
+        ntdll = ctypes.WinDLL("ntdll")
+        ntdll.NtResumeProcess.argtypes = (wintypes.HANDLE,)
+        ntdll.NtResumeProcess.restype = ctypes.c_long
+        self._ntdll = ntdll
 
     def _fail(self, call):
         code = ctypes.get_last_error()
@@ -98,8 +115,36 @@ class _Kernel:
         if not self._k32.SetInformationJobObject(job, _INFO_EXTENDED_LIMIT, ctypes.byref(info), ctypes.sizeof(info)):
             self._fail("SetInformationJobObject")
 
+    def set_limits(self, job, memory_bytes, active_processes):
+        """KILL_ON_JOB_CLOSE always stays on; a memory and/or a process-count limit is added to it."""
+        info = _ExtendedLimit()
+        flags = _KILL_ON_JOB_CLOSE
+        if memory_bytes is not None:
+            flags |= _LIMIT_JOB_MEMORY
+            info.JobMemoryLimit = memory_bytes
+        if active_processes is not None:
+            flags |= _LIMIT_ACTIVE_PROCESS
+            info.BasicLimitInformation.ActiveProcessLimit = active_processes
+        info.BasicLimitInformation.LimitFlags = flags
+        if not self._k32.SetInformationJobObject(job, _INFO_EXTENDED_LIMIT, ctypes.byref(info), ctypes.sizeof(info)):
+            self._fail("SetInformationJobObject")
+
+    def peak_memory(self, job):
+        """`PeakJobMemoryUsed`: the most the job ever held, plus what it was refused (TK1: over the limit = hit)."""
+        info = _ExtendedLimit()
+        if not self._k32.QueryInformationJobObject(job, _INFO_EXTENDED_LIMIT, ctypes.byref(info),
+                                                   ctypes.sizeof(info), None):
+            self._fail("QueryInformationJobObject")
+        return int(info.PeakJobMemoryUsed)
+
+    def resume(self, process):
+        status = self._ntdll.NtResumeProcess(process)
+        if status != 0:
+            raise JobObjectError(status & 0xFFFFFFFF, "NtResumeProcess failed (%#x)" % (status & 0xFFFFFFFF))
+
     def open_process(self, pid):
-        handle = self._k32.OpenProcess(_PROCESS_SET_QUOTA | _PROCESS_TERMINATE | _SYNCHRONIZE, False, pid)
+        handle = self._k32.OpenProcess(_PROCESS_SET_QUOTA | _PROCESS_TERMINATE | _PROCESS_SUSPEND_RESUME
+                                       | _SYNCHRONIZE, False, pid)
         if not handle:
             self._fail("OpenProcess")
         return handle
@@ -138,6 +183,7 @@ class JobObject:
 
     def __init__(self, kernel=None):
         self._k = kernel if kernel is not None else _default_kernel()
+        self._memory_limit = None
         self._handle = self._k.create_job()
         try:
             self._k.set_kill_on_close(self._handle)
@@ -160,6 +206,31 @@ class JobObject:
         finally:
             self._k.close(process)
 
+    def set_limits(self, limits):
+        """Apply the memory and process-count limits (None, or a JobLimits with both None, sets nothing)."""
+        if limits is None or (limits.memory_bytes is None and limits.active_processes is None):
+            return
+        self._k.set_limits(self._open(), limits.memory_bytes, limits.active_processes)
+        self._memory_limit = limits.memory_bytes
+
+    def resume(self, pid):
+        """Let a process made suspended run (after it was assigned)."""
+        self._open()
+        process = self._k.open_process(pid)
+        try:
+            self._k.resume(process)
+        finally:
+            self._k.close(process)
+
+    def peak_memory(self):
+        """The job's peak memory in bytes; only while the job is open."""
+        return self._k.peak_memory(self._open())
+
+    def memory_limit_hit(self):
+        """True when the job was refused memory: the peak is strictly over the limit (the refused amount counts in
+        the peak, PLAN TK1 section 3). The exit code of the child says nothing about it."""
+        return self._memory_limit is not None and self.peak_memory() > self._memory_limit
+
     def active_processes(self):
         return self._k.active(self._open())
 
@@ -180,13 +251,14 @@ class JobObject:
 
 _CORE = None
 _CORE_TRIED = False
+_CORE_FAILED = False
 _CORE_LOCK = threading.Lock()
 
 
 def ensure_core_job(kernel=None, force=False):
     """Once per process, put the core itself in a KILL_ON_JOB_CLOSE job. Returns that job, or None when it could
     not be done - which is never a reason to stop: it is only a net behind the per-item job."""
-    global _CORE, _CORE_TRIED
+    global _CORE, _CORE_FAILED, _CORE_TRIED
     with _CORE_LOCK:
         if _CORE_TRIED and not force:
             return _CORE
@@ -198,10 +270,18 @@ def ensure_core_job(kernel=None, force=False):
         except OSError:
             if job is not None:
                 job.close()
+            if not force:
+                _CORE_FAILED = True
             return None
         if not force:
             _CORE = job
         return job
+
+
+def core_job_state():
+    """False when the core tried to join its own net job and could not (the runner then warns
+    `core_job_unavailable`, once per job); True otherwise, including before any attempt."""
+    return not _CORE_FAILED
 
 
 def _end(proc):
@@ -226,12 +306,13 @@ def _abort(box, job):
     job.close()
 
 
-def spawn_in_job(argv, env, cwd, stdout, stderr, holder=None):
-    """Start `argv` in a new process group inside a new job; returns (Popen, JobObject). The process is made and
-    assigned in a helper thread while this one only waits, so an interrupt cannot fall between the two: it waits
-    for the helper to finish, ends what was made and raises again. `holder`, when given, gets `(proc, job)` the
-    moment the process exists (before it is returned), so a caller interrupted after this function returned still
-    knows what to end. A failed assignment ends the process and raises JobObjectError."""
+def spawn_in_job(argv, env, cwd, stdout, stderr, holder=None, limits=None):
+    """Start `argv` in a new process group inside a new job; returns (Popen, JobObject). The process is made
+    suspended, the job's `limits` are set, the process is assigned and only then let run - all in a helper thread
+    while this one only waits, so an interrupt cannot fall between the steps: it waits for the helper to finish,
+    ends what was made and raises again. `holder`, when given, gets `(proc, job)` the moment the process exists
+    (before it is returned), so a caller interrupted after this function returned still knows what to end. A step
+    that fails ends the process and raises JobObjectError."""
     ensure_core_job()
     job = JobObject()
     box = {}
@@ -239,11 +320,13 @@ def spawn_in_job(argv, env, cwd, stdout, stderr, holder=None):
     def work():
         try:
             proc = subprocess.Popen(argv, env=env, cwd=cwd, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
-                                    creationflags=CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW)
+                                    creationflags=CREATE_SUSPENDED | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW)
             box["proc"] = proc
             if holder is not None:
                 holder.append((proc, job))
+            job.set_limits(limits)
             job.assign(proc.pid)
+            job.resume(proc.pid)
         except BaseException as exc:  # handed to the waiting thread, which raises it
             box["error"] = exc
 

@@ -27,10 +27,10 @@ def tools_which(cmd, path=None):
 def media_deps(scenario="ok_mp4", dns=urlpolicy.DNS_OK, spawned=None, **extra):
     from agent_crawl_studio import jobobject
 
-    def spawn(argv, env, cwd, out, err, holder=None):
+    def spawn(argv, env, cwd, out, err, holder=None, limits=None):
         if spawned is not None:
             spawned.append(argv)
-        return jobobject.spawn_in_job(argv, env, cwd, out, err, holder=holder)
+        return jobobject.spawn_in_job(argv, env, cwd, out, err, holder=holder, limits=limits)
 
     deps = {"which": tools_which, "version_of": lambda name: "2026.10.26", "dns_probe": lambda host: dns,
             "engine_prefix": lambda: [sys.executable, "-P", FAKE, scenario], "poll": 0.05, "spawn": spawn,
@@ -266,3 +266,22 @@ def test_adopt_gets_the_smaller_of_the_per_file_cap_and_the_budget_left(world, s
     monkeypatch.setattr(artifacts.ArtifactWriter, "adopt", spy)
     result, code = go(world, server, [YT], deps=media_deps(), mode="media", limits={"max_total_bytes": 10 ** 6})
     assert code == 0 and seen == [min(result["limits_effective"]["max_bytes_per_file"], 10 ** 6)]
+
+
+# ----------------------------------------------------------- SPR-04 TK5: the core net warning (FR22.2)
+
+def test_a_missing_core_job_is_one_warning_per_job_and_the_items_still_run(world, server, monkeypatch):
+    from agent_crawl_studio import jobobject
+
+    monkeypatch.setattr(jobobject, "_CORE_FAILED", True)
+    result, code = run_media(world, server, [YT, YT + "x"])
+    assert code == 0 and [item["status"] for item in result["items"]] == ["succeeded", "succeeded"]
+    assert result["warnings"].count("core_job_unavailable") == 1
+
+
+def test_a_present_core_job_adds_no_warning(world, server, monkeypatch):
+    from agent_crawl_studio import jobobject
+
+    monkeypatch.setattr(jobobject, "_CORE_FAILED", False)
+    result, code = run_media(world, server, [YT])
+    assert "core_job_unavailable" not in result["warnings"]

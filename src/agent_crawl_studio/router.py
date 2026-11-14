@@ -5,6 +5,7 @@ from . import urlpolicy
 
 ADAPTER_MEDIA = "yt-dlp"
 ADAPTER_DIRECT = "direct-http"
+ADAPTER_EXTRACT = "extract"
 MEDIA_PORT = 443
 
 
@@ -23,6 +24,8 @@ def route(norm, mode, media_hosts):
     mode is `media` and the URL is not an https:443 URL of an allowlisted host."""
     if mode in ("gallery", "crawl"):
         return None
+    if mode == "extract":  # every URL of the mode is a page to read as text, a media host included (FR18.1)
+        return ADAPTER_EXTRACT
     if mode == "media":
         if not _media_ok(norm, media_hosts):
             raise urlpolicy.Blocked("media_host")
