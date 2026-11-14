@@ -1,6 +1,6 @@
 {
   "name": "agent-crawl-studio",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Safe web and media crawling for agents: plan, fetch and extract with a manifest and security policy.",
   "author": {
     "name": "Nguyễn Quang Đức"
