@@ -24,12 +24,19 @@ if (-not $opcos) { $opcos = Join-Path $HOME 'OpcOS' }
 $rt = Join-Path $opcos 'system\operations\runtime\opcos-runtime.ps1'
 if (-not (Test-Path -LiteralPath $rt)) { Write-Missing }
 
+# Windows PowerShell 5.1 turns a native tool's stderr line into a terminating error while $ErrorActionPreference
+# is 'Stop', even with 2>$null: relax it for this one call and decide by the exit code and the path (FR16.1).
 $py = $null
+$strict = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
 try {
-    $py = & $rt resolve venvs agent-crawl-studio core --python 2>$null | Select-Object -Last 1
-    if ($LASTEXITCODE -ne 0) { $py = $null }
+    $found = & $rt resolve venvs agent-crawl-studio core --python 2>$null | Where-Object { $_ -is [string] } |
+        Select-Object -Last 1
+    if ($LASTEXITCODE -eq 0) { $py = $found }
 } catch {
     $py = $null
+} finally {
+    $ErrorActionPreference = $strict
 }
 if (-not $py -or -not (Test-Path -LiteralPath $py)) { Write-Missing }
 

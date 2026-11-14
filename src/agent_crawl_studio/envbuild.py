@@ -6,6 +6,11 @@ ALLOWED_KEYS = ("PATH", "SystemRoot", "windir", "PATHEXT", "USERPROFILE", "TEMP"
 _DEFAULT_ROOT = r"C:\Windows"
 
 
+def process_env():
+    """A copy of this process's environment, the `base` of `build_subprocess_env` when none is injected."""
+    return dict(os.environ)
+
+
 def build_subprocess_env(base, job_tmp, node_dir=None):
     root = base.get("SystemRoot") or _DEFAULT_ROOT
     path = [os.path.join(root, "System32"), root]

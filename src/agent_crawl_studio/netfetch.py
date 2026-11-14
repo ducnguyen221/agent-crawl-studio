@@ -34,13 +34,19 @@ TIMEOUT_CLASSES = (httpcore.ConnectTimeout, httpcore.ReadTimeout, httpcore.Write
 
 
 class NetError(Exception):
-    """What the transport raises instead of any httpcore exception: a code (URL_BLOCKED, NETWORK_ERROR, TIMEOUT)
-    and a `reason` from a closed list (or None). Never carries exception text."""
+    """What the transport raises instead of any httpcore exception: a code (URL_BLOCKED, NETWORK_ERROR, TIMEOUT),
+    a `reason` from a closed list (or None) and, for a TIMEOUT, the `kind` of wait that ran out: "connect", "idle"
+    or "deadline" (the time of the item or of the job). Never carries exception text."""
 
-    def __init__(self, code, reason=None):
+    def __init__(self, code, reason=None, kind=None):
         super().__init__(code)
         self.code = code
         self.reason = reason
+        self.kind = kind
+
+
+class DeadlineTimeout(httpcore.ReadTimeout):
+    """The absolute deadline of a request has passed (not a wait of the socket)."""
 
 
 def _chain(exc):
@@ -56,8 +62,10 @@ def classify(exc, body=False):
     error that surfaced while the body was being read: only then is a protocol error a truncated body."""
     if isinstance(exc, NetError):
         return exc
+    if isinstance(exc, DeadlineTimeout):
+        return NetError("TIMEOUT", kind="deadline")
     if isinstance(exc, TIMEOUT_CLASSES):
-        return NetError("TIMEOUT")
+        return NetError("TIMEOUT", kind="idle" if isinstance(exc, (httpcore.ReadTimeout, httpcore.WriteTimeout)) else "connect")
     chain = _chain(exc)
     for found in chain:
         if isinstance(found, ssl.SSLCertVerificationError):
@@ -78,6 +86,14 @@ def classify(exc, body=False):
     return NetError("NETWORK_ERROR", "other")
 
 
+def _by_deadline(exc, timeout, capped):
+    """A socket that ran out of time on a wait the deadline had cut short (`capped` < `timeout`) ran out of the
+    deadline, not of its own idle wait: it is the deadline's timeout (the item's or the job's)."""
+    if timeout is None or capped < timeout:
+        return DeadlineTimeout("deadline")
+    return exc
+
+
 class DeadlineStream(httpcore.NetworkStream):
     """A network stream whose every read, write and TLS handshake is capped by the time left until the backend's
     absolute deadline: a server that sends one byte at a time cannot stretch a request past it."""
@@ -86,10 +102,18 @@ class DeadlineStream(httpcore.NetworkStream):
         self._stream, self._backend = stream, backend
 
     def read(self, max_bytes, timeout=None):
-        return self._stream.read(max_bytes, timeout=self._backend.remaining(timeout))
+        capped = self._backend.remaining(timeout)
+        try:
+            return self._stream.read(max_bytes, timeout=capped)
+        except httpcore.ReadTimeout as exc:
+            raise _by_deadline(exc, timeout, capped) from exc
 
     def write(self, buffer, timeout=None):
-        self._stream.write(buffer, timeout=self._backend.remaining(timeout))
+        capped = self._backend.remaining(timeout)
+        try:
+            self._stream.write(buffer, timeout=capped)
+        except httpcore.WriteTimeout as exc:
+            raise _by_deadline(exc, timeout, capped) from exc
 
     def close(self):
         self._stream.close()
@@ -109,38 +133,47 @@ class DeadlineStream(httpcore.NetworkStream):
 class PinnedBackend(httpcore.NetworkBackend):
     """Resolve, filter and connect in one call, to an IP that passed `policy.ip_ok`."""
 
-    def __init__(self, policy):
+    def __init__(self, policy, clock=time.monotonic):
         self.policy = policy
+        self._clock = clock  # the one monotonic clock of this backend; tests may inject it
         self._inner = httpcore.SyncBackend()
-        self.deadline = None  # absolute time.monotonic() value set per request by the transport
+        self.deadline = None  # absolute `clock()` value set per request by the transport
 
     def remaining(self, timeout):
         """`timeout` capped by the time left before the deadline; a passed deadline is a timeout."""
         if self.deadline is None:
             return timeout
-        left = self.deadline - time.monotonic()
+        left = self.deadline - self._clock()
         if left <= 0:
-            raise httpcore.ReadTimeout("deadline")
+            raise DeadlineTimeout("deadline")
         return left if timeout is None else min(timeout, left)
 
     def _resolve(self, host, port, timeout):
         box = {}
-        if not RESOLVER_SLOTS.acquire(blocking=False):
-            raise NetError("TIMEOUT")
+        worker = None
+        got = False
+        try:  # a Ctrl+C before the thread runs must give the slot back: nothing else would (the sweep of RQ-011)
+            got = RESOLVER_SLOTS.acquire(blocking=False)
+            if not got:
+                raise NetError("TIMEOUT", kind="connect")
 
-        def lookup():
-            try:
-                box["infos"] = self.policy.resolver(host, port, proto=socket.IPPROTO_TCP)
-            except BaseException as exc:  # noqa: BLE001 - whatever a resolver raises is "did not resolve"
-                box["error"] = exc
-            finally:
+            def lookup():
+                try:
+                    box["infos"] = self.policy.resolver(host, port, proto=socket.IPPROTO_TCP)
+                except BaseException as exc:  # noqa: BLE001 - whatever a resolver raises is "did not resolve"
+                    box["error"] = exc
+                finally:
+                    RESOLVER_SLOTS.release()
+
+            worker = threading.Thread(target=lookup, daemon=True)
+            worker.start()
+        except BaseException:
+            if got and (worker is None or worker.ident is None):  # the thread never ran: its `finally` will not release
                 RESOLVER_SLOTS.release()
-
-        worker = threading.Thread(target=lookup, daemon=True)
-        worker.start()
+            raise
         worker.join(timeout)
         if worker.is_alive():
-            raise NetError("TIMEOUT")
+            raise NetError("TIMEOUT", kind="connect")
         try:
             return [info[4][0] for info in box["infos"]]
         except (KeyError, TypeError, IndexError):  # a failed lookup, or an answer that is not a list of address records
@@ -150,7 +183,7 @@ class PinnedBackend(httpcore.NetworkBackend):
         if port not in self.policy.ports:
             raise NetError("URL_BLOCKED", "port_not_allowed")
         timeout = self.remaining(timeout)
-        started = time.monotonic()
+        started = self._clock()
         addresses = self._resolve(host, port, timeout)
         if not addresses:
             raise NetError("NETWORK_ERROR", "dns_failed")
@@ -159,7 +192,7 @@ class PinnedBackend(httpcore.NetworkBackend):
             raise NetError("URL_BLOCKED", "ip_not_public")
         last = None
         for ip in usable:  # the literal IP: the name is never resolved a second time
-            left = None if timeout is None else timeout - (time.monotonic() - started)
+            left = None if timeout is None else timeout - (self._clock() - started)
             if left is not None and left <= 0:  # one deadline for the whole connect phase, not one per address
                 raise last or httpcore.ConnectTimeout("connect deadline")
             try:
@@ -255,6 +288,7 @@ class FetchOutcome:
     headers_clean: dict = dataclasses.field(default_factory=dict)
     bytes_received: int = 0
     warnings: list = dataclasses.field(default_factory=list)
+    timeout_kind: str | None = None  # a TIMEOUT only: "connect" | "idle" | "item" | "job" (FR14.2, FR14.5)
 
 
 def _clean_header(value):
@@ -296,6 +330,7 @@ class _Run:
         self.redirects = 0
         self.final_url = None
         self.headers = {}
+        self.left = None  # the time the request in hand was allowed, set by `hop`
 
     def outcome(self, status, code=None, reason=None, http_status=None, **extra):
         if code == "NETWORK_ERROR":
@@ -319,13 +354,20 @@ class _Run:
         now = self.clock()
         return now >= self.item_deadline or (self.job_deadline is not None and now >= self.job_deadline)
 
+    def deadline_kind(self):
+        """Which deadline ends the request first: the job's or the item's."""
+        return "job" if self.job_deadline is not None and self.job_deadline <= self.item_deadline else "item"
+
+    def timed_out(self, kind):
+        return self.outcome("failed", "TIMEOUT", timeout_kind=kind)
+
     def hop(self, target):
         """One request. Returns (FetchOutcome, None) when finished, or (None, location) for a redirect."""
         if self.late():
-            return self.outcome("failed", "TIMEOUT"), None
+            return self.timed_out(self.deadline_kind()), None
         own = self.client is None
         client = build_client(self.policy, self.limits) if own else self.client
-        left = _time_left(self.clock(), self.item_deadline, self.job_deadline)
+        left = self.left = _time_left(self.clock(), self.item_deadline, self.job_deadline)
         timeout = httpx.Timeout(connect=min(self.limits["connect_timeout"], left),
                                 read=min(self.limits["idle_timeout"], left),
                                 write=min(self.limits["idle_timeout"], left),
@@ -369,7 +411,16 @@ class _Run:
     def net_failure(self, exc):
         if exc.code == "URL_BLOCKED":
             return self.blocked(exc.reason)
+        if exc.code == "TIMEOUT":
+            return self.timed_out(self.timeout_kind(exc.kind))
         return self.outcome("failed", exc.code, exc.reason)
+
+    def timeout_kind(self, kind):
+        """A wait that was cut short by the time left of the item or the job is a timeout of that deadline, not of
+        the connect or idle wait it was part of."""
+        if kind in ("connect", "idle") and self.left is not None and self.left <= self.limits[kind + "_timeout"]:
+            kind = "deadline"
+        return self.deadline_kind() if kind == "deadline" else kind
 
     def read(self, response, target):
         status = response.status_code
@@ -426,7 +477,7 @@ class _Run:
             if declared is not None and self.received >= declared:
                 break
             if self.late():
-                return self.outcome("failed", "TIMEOUT", None, status)
+                return self.outcome("failed", "TIMEOUT", None, status, timeout_kind=self.deadline_kind())
         if sniffing and held:
             if sniff.looks_like_html(held):
                 return self.outcome("failed", "CONTENT_MISMATCH", None, status)

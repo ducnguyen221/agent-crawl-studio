@@ -193,7 +193,7 @@ def test_the_interface_has_exactly_the_documented_parameters_and_no_switch(nf):
     assert list(inspect.signature(nf.build_client).parameters) == ["policy", "timeouts", "transport"]
     assert list(inspect.signature(nf.fetch_item).parameters) == [
         "url", "expect", "limits", "sink", "policy", "client", "total_remaining", "clock", "job_deadline"]
-    assert list(inspect.signature(nf.PinnedBackend).parameters) == ["policy"]
+    assert list(inspect.signature(nf.PinnedBackend).parameters) == ["policy", "clock"]
     assert list(inspect.signature(nf.PinnedTransport).parameters) == ["policy", "limits", "network_backend"]
 
 

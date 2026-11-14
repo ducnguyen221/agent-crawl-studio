@@ -17,6 +17,7 @@ DEFAULTS = {
     "connect_timeout": 15,
     "idle_timeout": 60,
     "item_timeout": 600,
+    "media_item_timeout": 2700,  # yt-dlp items: a long video needs longer than a file
     "job_timeout": 4 * 3600,
     "retries": 3,
     "max_redirects": 5,
@@ -32,12 +33,14 @@ HARD_CAPS = {
     "connect_timeout": 60,
     "idle_timeout": 300,
     "item_timeout": 4 * 3600,
+    "media_item_timeout": 4 * 3600,
     "job_timeout": 24 * 3600,
     "retries": 5,
     "max_redirects": 10,
     "max_html_bytes": 50 * MiB,
 }
-TIMEOUT_KEYS = ("connect_timeout", "idle_timeout", "item_timeout", "job_timeout")  # seconds, may be fractional
+TIMEOUT_KEYS = ("connect_timeout", "idle_timeout", "item_timeout", "media_item_timeout", "job_timeout")  # seconds, may be fractional
+ZERO_OK = ("retries",)  # `retries: 0` is valid: every item runs once (FR14.1)
 FREE_SPACE_FLOOR = 5 * GiB
 
 
@@ -49,14 +52,14 @@ def _number(value, key):
         raise ContractError("INVALID_REQUEST", path, "wrong_type")
     if isinstance(value, float) and not math.isfinite(value):
         raise ContractError("INVALID_REQUEST", path, "out_of_range")
-    if value <= 0 or value > HARD_CAPS[key]:
+    if value < 0 or (value == 0 and key not in ZERO_OK) or value > HARD_CAPS[key]:
         raise ContractError("INVALID_REQUEST", path, "out_of_range")
     return value
 
 
 def resolve(limits_in):
-    """Return (effective limits, warnings). `concurrency` and `retries` are accepted but this release
-    runs one item at a time and never retries, so the warnings are always present."""
+    """Return (effective limits, warnings). `concurrency` is accepted but this release runs one item at a time,
+    so its warning is always present; `retries` works (FR14)."""
     if limits_in is None:
         limits_in = {}
     if not isinstance(limits_in, dict):
@@ -67,7 +70,7 @@ def resolve(limits_in):
     effective = dict(DEFAULTS)
     for key, value in limits_in.items():
         effective[key] = _number(value, key)
-    return effective, ["concurrency_not_applied", "retries_not_applied"]
+    return effective, ["concurrency_not_applied"]
 
 
 def required_free_bytes(effective, item_count):
