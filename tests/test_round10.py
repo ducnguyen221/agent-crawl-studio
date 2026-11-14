@@ -29,18 +29,39 @@ def fake_fetch(url, expect, limits, sink, policy, **kwargs):
                                  final_url_redacted=url, bytes_received=11)
 
 
-def sweep_once(tmp_path, number, label):
-    """One run with a Ctrl+C at the `number`-th executed line of WATCH; returns (state, problems, result)."""
+def fake_page_fetch(url, expect, limits, sink, policy, **kwargs):
+    page = b"<!DOCTYPE html><html><head><title>t</title></head><body><p>hello world</p></body></html>"
+    sink(page)
+    return netfetch.FetchOutcome(status="ok", http_status=200, headers_clean={"content-type": "text/html"}, final_url=url,
+                                 final_url_redacted=url, bytes_received=len(page))
+
+
+EXTRACT_STRIDE = 1  # TK11: every line, not a sample
+
+
+def extract_scenario():
+    """The sweep of an `extract` item: a fake page, a fake child (it writes a good result and is gone) and the engine
+    reported as installed; `extract.py` is watched too, since the child is run from there (SPR-04 TK9, FR19.5)."""
+    import extract_support as sup
+    from agent_crawl_studio import extract
+    extract._scan()  # the tables of the cleaning step are built once per process (~1 million traced lines): not in the sweep
+    deps = {"fetch": fake_page_fetch, "spawn": sup.FakeSpawn(sup.good_effect), "version_of": lambda name: "2.3.1"}
+    return {"mode": "extract", "extra_deps": deps, "watch": WATCH + (os.path.join(SRC, "extract.py"),)}
+
+
+def sweep_once(tmp_path, number, label, mode=None, extra_deps=None, watch=WATCH):
+    """One run with a Ctrl+C at the `number`-th executed line of `watch`; returns (state, problems, result)."""
     work = tmp_path / ("w%s_%d" % (label, number))
     env = {"CRAWL_STUDIO_WORK": str(work), "OPCOS_ROOT": str(work / "o"), "USERPROFILE": str(work / "h")}
-    request = request_of(["https://a.example/x"])
-    state = {"count": 0, "fired": None}
+    request = request_of(["https://a.example/x"], **({"mode": mode} if mode else {}))
+    state = {"count": 0, "fired": None, "firsts": {}}
 
     def tracer(frame, event, arg):
         if event == "call":
-            return tracer if frame.f_code.co_filename in WATCH else None
+            return tracer if frame.f_code.co_filename in watch else None
         if event == "line" and state["fired"] is None:
             state["count"] += 1
+            state["firsts"].setdefault((os.path.basename(frame.f_code.co_filename), frame.f_code.co_name), state["count"])
             if state["count"] == number:
                 state["fired"] = (os.path.basename(frame.f_code.co_filename), frame.f_code.co_name, frame.f_lineno)
                 raise KeyboardInterrupt
@@ -50,7 +71,8 @@ def sweep_once(tmp_path, number, label):
     escaped, result, code = False, None, None
     sys.settrace(tracer)
     try:
-        result, code = runner.run(request, env, dict(FAKES, fetch=fake_fetch, sleep=lambda seconds: None))
+        result, code = runner.run(request, env, dict(dict(FAKES, fetch=fake_fetch, sleep=lambda seconds: None),
+                                                     **(extra_deps or {})))
     except KeyboardInterrupt:
         escaped = True
     finally:
@@ -75,6 +97,8 @@ def sweep_once(tmp_path, number, label):
             present = set(os.listdir(folder / "files")) if (folder / "files").exists() else set()
             if present - listed:
                 problems.append("a finished file the result does not list")
+            if mode == "extract" and (folder / ".tmp").exists() and os.listdir(folder / ".tmp"):
+                problems.append("an item folder or a part is left in .tmp")
             if "manifest_not_updated" not in result["warnings"]:
                 path = folder / "manifest.json"
                 if not path.exists() or json.loads(path.read_text(encoding="utf-8")) != result:
@@ -95,6 +119,32 @@ def test_a_ctrl_c_at_every_line_of_a_job_leaves_nothing_behind(tmp_path):
             failures.append((state["fired"], problems))
     assert failures == []
     # the only lines where Ctrl+C may leave run(): the first lines of run() itself, before anything exists
+    assert escapes and all(fired[1] == "run" for fired in escapes) and len(escapes) <= 8, escapes
+
+
+def test_a_ctrl_c_at_every_line_of_an_extract_item_leaves_nothing_behind(tmp_path):
+    """SPR-04 TK9, FR19.5: the same sweep for the extract mode (download, HTML placed, child, `.md` adopted, folders
+    taken away); the `.tmp` folder of the job must hold no item folder after any of the interrupts."""
+    scenario = extract_scenario()
+    baseline, problems, result = sweep_once(tmp_path, 10 ** 9, "xbase", **scenario)
+    assert problems == [] and baseline["count"] > 500
+    assert result["status"] == "succeeded" and [a["role"] for a in result["items"][0]["artifacts"]] == ["extract", "source"]
+    # Sampled, not every line (the full sweep of an extract item took over 30 minutes): every EXTRACT_STRIDE-th line,
+    # plus the first lines of every function that ran (before / in / after the spawn, the wait, the result, `place`,
+    # the adoption, the clean-up) and the last lines of the run.
+    count = baseline["count"]
+    points = set(range(1, count + 1, EXTRACT_STRIDE)) | set(range(count - 5, count + 1))
+    for first in baseline["firsts"].values():
+        points |= {first, first + 1, first + 2, first + 3}
+    failures, escapes = [], []
+    for number in sorted(point for point in points if 1 <= point <= count):
+        state, problems, _ = sweep_once(tmp_path, number, "x", **scenario)
+        if "escaped" in problems:
+            escapes.append(state["fired"])
+            problems.remove("escaped")
+        if problems:
+            failures.append((state["fired"], problems))
+    assert failures == []
     assert escapes and all(fired[1] == "run" for fired in escapes) and len(escapes) <= 8, escapes
 
 

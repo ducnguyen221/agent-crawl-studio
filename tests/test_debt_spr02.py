@@ -186,7 +186,7 @@ class FakeJob:
         self.closed = True
 
 
-def fake_media_spawn(argv, env, cwd, out, err, holder=None):
+def fake_media_spawn(argv, env, cwd, out, err, holder=None, limits=None):
     dl = [a for a in argv if a.startswith("home:")][0][5:]
     with open(os.path.join(dl, "media.mp4"), "wb") as handle:
         handle.write(b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 64)
@@ -203,7 +203,7 @@ def media_once(tmp_path, number):
     state = {"count": 0, "fired": None}
     spawned, killed = [], []
 
-    def spawn(argv, env, cwd, out, err, holder=None):
+    def spawn(argv, env, cwd, out, err, holder=None, limits=None):
         dl = [a for a in argv if a.startswith("home:")][0][5:]
         with open(os.path.join(dl, "media.mp4"), "wb") as handle:
             handle.write(b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 64)
@@ -389,12 +389,12 @@ def _interrupt_the_final_write(monkeypatch, times):
     real = manifest.ManifestWriter.finish
     seen = []
 
-    def finish(self, status, finished_at, error=None, warnings=(), write=True):
+    def finish(self, status, finished_at, error=None, warnings=(), write=True, network_bytes=None):
         if write and len(seen) < times:
             seen.append(1)
-            real(self, status, finished_at, error, warnings, write=False)
+            real(self, status, finished_at, error, warnings, write=False, network_bytes=network_bytes)
             raise KeyboardInterrupt
-        return real(self, status, finished_at, error, warnings, write=write)
+        return real(self, status, finished_at, error, warnings, write=write, network_bytes=network_bytes)
 
     monkeypatch.setattr(manifest.ManifestWriter, "finish", finish)
 

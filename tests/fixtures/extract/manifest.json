@@ -1,0 +1,161 @@
+[
+ {
+  "file": "blog.html",
+  "charset": "utf-8",
+  "gold": "blog.txt",
+  "must_absent": [
+   "Reader comments",
+   "Great tips, thanks for sharing this with everyone",
+   "My bin smells sour every week, what am I doing wrong",
+   "Popular posts",
+   "Ten tools every gardener owns",
+   "Subscribe to our newsletter today and never miss a post",
+   "Copyright 2026 Fixture Garden Blog, all rights reserved"
+  ],
+  "hidden": [],
+  "expect": "text"
+ },
+ {
+  "file": "table-layout.html",
+  "charset": "iso-8859-1",
+  "gold": "table-layout.txt",
+  "must_absent": [
+   "Our company history page",
+   "Sign our guestbook now",
+   "Best viewed with any browser at 800x600",
+   "Visitors counter",
+   "Last updated in 2003",
+   "Old Workshop Home Page",
+   "Price list",
+   "Contact the shop"
+  ],
+  "hidden": [],
+  "expect": "text"
+ },
+ {
+  "file": "nav-ads.html",
+  "charset": "utf-8",
+  "gold": "nav-ads.txt",
+  "must_absent": [
+   "Accept all cookies to continue",
+   "Shop by category",
+   "New arrivals this week",
+   "Limited time offer: save 40 percent on all storage boxes",
+   "Sponsored: ten gadgets you never knew you needed",
+   "Share this on social media",
+   "Sign up for weekly deals and discounts",
+   "Related stories you might enjoy",
+   "Fifteen desk lamps ranked by readers",
+   "Terms and conditions apply to every promotion",
+   "Customer service centre",
+   "Loyalty programme"
+  ],
+  "hidden": [],
+  "expect": "text"
+ },
+ {
+  "file": "vi-utf8.html",
+  "charset": "utf-8",
+  "gold": "vi-utf8.txt",
+  "must_absent": [
+   "Bài viết liên quan bạn có thể quan tâm",
+   "Cách chọn hạt cà phê rang vừa",
+   "Mẹo bảo quản cà phê xay",
+   "Đăng ký nhận bản tin hằng tuần",
+   "Bản quyền thuộc về trang thử nghiệm",
+   "Liên hệ với chúng tôi"
+  ],
+  "hidden": [],
+  "expect": "text"
+ },
+ {
+  "file": "vi-windows1258.html",
+  "charset": "windows-1258",
+  "gold": "vi-windows1258.txt",
+  "must_absent": [
+   "Hỏi đáp thường gặp",
+   "Khuyến mãi lớn cuối tuần cho mọi loại chậu sứ",
+   "Mọi quyền được bảo lưu bởi trang mẫu",
+   "Theo dõi chúng tôi trên mạng xã hội",
+   "Tin mới"
+  ],
+  "hidden": [],
+  "expect": "text"
+ },
+ {
+  "file": "long-200k.html",
+  "charset": "utf-8",
+  "gold": "long-200k.txt",
+  "must_absent": [
+   "More from the editors",
+   "Editors picks for the winter issue",
+   "An index of all essays by theme",
+   "Contact the editors",
+   "Reproduction of this essay is welcome with credit"
+  ],
+  "hidden": [],
+  "expect": "text"
+ },
+ {
+  "file": "broken.html",
+  "charset": "utf-8",
+  "gold": "broken.txt",
+  "must_absent": [
+   "Bicycle shop navigation menu",
+   "Workshop opening hours"
+  ],
+  "hidden": [],
+  "expect": "text"
+ },
+ {
+  "file": "injection.html",
+  "charset": "utf-8",
+  "gold": "injection.txt",
+  "must_absent": [
+   "CSMARK-B5D20E",
+   "Opening hours of the branch",
+   "Page maintained by the fixture author"
+  ],
+  "hidden": [
+   "CSMARK-A7F3C9-DISPLAYNONE",
+   "CSMARK-A7F3C9-COMMENT",
+   "CSMARK-A7F3C9-HIDDENATTR",
+   "CSMARK-A7F3C9-TEMPLATE",
+   "CSMARK-A7F3C9-ARIAHIDDEN",
+   "CSMARK-A7F3C9-FONTSIZE0",
+   "CSMARK-A7F3C9-VISIBILITY",
+   "CSMARK-A7F3C9-OPACITY0",
+   "CSMARK-A7F3C9-NOSCRIPT"
+  ],
+  "expect": "text"
+ },
+ {
+  "file": "code-tables.html",
+  "charset": "utf-8",
+  "gold": "code-tables.txt",
+  "must_absent": [
+   "Documentation index",
+   "Download the tool",
+   "Documentation version 4 for the sample tool"
+  ],
+  "hidden": [],
+  "expect": "text"
+ },
+ {
+  "file": "no-text.html",
+  "charset": "utf-8",
+  "gold": "no-text.txt",
+  "must_absent": [],
+  "hidden": [],
+  "expect": "no_text"
+ },
+ {
+  "file": "large-generated.html",
+  "charset": "utf-8",
+  "gold": null,
+  "must_absent": [],
+  "hidden": [],
+  "expect": "memory_only",
+  "generate": "large"
+ }
+]

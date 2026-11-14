@@ -91,9 +91,9 @@ def test_assign_failure_kills_process(item, monkeypatch):
     def refuse(self, pid):
         raise jobobject.JobObjectError(5, "assign refused")
 
-    def spy(argv, env, cwd, out, err, holder=None):
+    def spy(argv, env, cwd, out, err, holder=None, limits=None):
         holder_seen.append(holder)
-        return jobobject.spawn_in_job(argv, env, cwd, out, err, holder=holder)
+        return jobobject.spawn_in_job(argv, env, cwd, out, err, holder=holder, limits=limits)
 
     monkeypatch.setattr(jobobject.JobObject, "assign", refuse)
     outcome = run_tree(item, {"spawn": spy})
@@ -132,9 +132,9 @@ def test_the_child_does_not_get_ctrl_c_from_the_console(item, monkeypatch):
     """FR12.6: the engine runs in its own process group; the core stops it by itself (see the interrupt test)."""
     seen = []
 
-    def spy(argv, env, cwd, out, err, holder=None):
+    def spy(argv, env, cwd, out, err, holder=None, limits=None):
         seen.append(argv)
-        return jobobject.spawn_in_job(argv, env, cwd, out, err, holder=holder)
+        return jobobject.spawn_in_job(argv, env, cwd, out, err, holder=holder, limits=limits)
 
     flags_seen = []
     real = subprocess.Popen

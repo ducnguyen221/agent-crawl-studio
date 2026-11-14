@@ -190,11 +190,15 @@ class ArtifactWriter:
             return name, target
         raise ArtifactError("names")
 
-    def commit(self, part, *, content_type, source_url_redacted, host_url):
+    def commit(self, part, *, content_type, source_url_redacted, host_url, role=None, mime=None, extra=None):
         """Close the part and put it into files/. Returns the artifact record; raises ArtifactError (the part
-        is removed) or whatever `check` raises (the file is removed)."""
+        is removed) or whatever `check` raises (the file is removed).
+
+        `role` (when given) goes into the record and `extra` adds fields, never replacing one the writer measured.
+        `mime` is for a page the caller has already recognised in a way `sniff.detect` cannot (the source page of the
+        extract mode: UTF-16 or XHTML): it is the record's type and gives the extension."""
         part.close()
-        mime = sniff.detect(part.head)
+        mime = mime or sniff.detect(part.head)
         try:
             name, target = self._place(part, sniff.extension_for(mime))
         except ArtifactError:
@@ -220,6 +224,10 @@ class ArtifactWriter:
             artifact["mime_declared"] = declared
         artifact.update(engine="httpx", engine_version=httpx.__version__, source_url_redacted=source_url_redacted,
                         warnings=warnings)
+        if role is not None:
+            artifact["role"] = role
+        for key, value in (extra or {}).items():
+            artifact.setdefault(key, value)
         return artifact
 
     @staticmethod
@@ -259,11 +267,16 @@ class ArtifactWriter:
         return total, sha.hexdigest(), head, before
 
     def adopt(self, item_id, src_path, *, source_url_redacted, host_url, engine, engine_version, max_bytes,
-              allowed_mimes):
+              allowed_mimes, role=None, mime=None, extra=None):
         """Take a finished file that another tool wrote (yt-dlp, with its tree already dead) into files/. The
         source is read once through one handle (no reparse point, one link), hashed, its type taken from its
         bytes; a type outside `allowed_mimes` or a size over `max_bytes` removes the source and raises
-        ArtifactError("mime"/"size"). Returns the artifact record."""
+        ArtifactError("mime"/"size"). Returns the artifact record.
+
+        `role` (when given) goes into the record and `extra` adds more fields, never replacing one the writer
+        measured. `mime="text/markdown"` is the one type the caller may name: it is valid only for a file the bytes
+        show as `text/plain` (an HTML comment as first line shows `text/html` and is refused), and then it is the
+        record's type and gives the `.md` extension; any other `mime` raises ArtifactError("mime") as a bad type."""
         try:
             total, digest, head, before = self._read_source(src_path, max_bytes)
         except ArtifactError as exc:
@@ -271,11 +284,15 @@ class ArtifactWriter:
                 with contextlib.suppress(OSError):
                     os.remove(src_path)
             raise
-        mime = sniff.detect(head)
-        if mime not in allowed_mimes:
+        mime_seen = sniff.detect(head)
+        wanted = mime_seen
+        if mime is not None:  # the caller names the type of a plain text file (FR21.2)
+            wanted = mime if (mime == "text/markdown" and mime_seen == "text/plain") else None
+        if wanted is None or wanted not in allowed_mimes:
             with contextlib.suppress(OSError):
                 os.remove(src_path)
             raise ArtifactError("mime")
+        mime = wanted
         after = self._plain_source(src_path)  # swapped for a link or another file since it was read: refuse
         if (after.st_ino, after.st_size) != (before.st_ino, before.st_size):
             raise PathBlocked("changed")
@@ -294,8 +311,13 @@ class ArtifactWriter:
             with contextlib.suppress(OSError):
                 os.remove(target)
             raise
-        return {"path": "files/" + name, "bytes": total, "sha256": digest, "mime": mime, "engine": engine,
-                "engine_version": engine_version, "source_url_redacted": source_url_redacted, "warnings": warnings}
+        artifact = {"path": "files/" + name, "bytes": total, "sha256": digest, "mime": mime, "engine": engine,
+                    "engine_version": engine_version, "source_url_redacted": source_url_redacted, "warnings": warnings}
+        if role is not None:
+            artifact["role"] = role
+        for key, value in (extra or {}).items():
+            artifact.setdefault(key, value)
+        return artifact
 
 
 class _Source:

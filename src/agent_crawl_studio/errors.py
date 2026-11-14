@@ -66,7 +66,7 @@ REJECTED_EXIT = 2  # request refused before anything ran
 # Closed list of `reason` values for NETWORK_ERROR / CONTENT_MISMATCH. Never a piece of exception text.
 REASONS = (
     "tls_verify_failed", "connection_refused", "connection_reset", "dns_failed", "network_unreachable",
-    "http_status", "truncated_body", "content_encoding_unsupported", "forbidden", "other",
+    "http_status", "truncated_body", "content_encoding_unsupported", "forbidden", "not_html", "no_text", "other",
 )
 
 HINT_CODES = ("unknown_key", "wrong_type", "out_of_range", "nothing_to_retry")
@@ -76,6 +76,8 @@ HINTS = {
     "tools_missing": "install ffmpeg, node and the core venv; nothing was installed",
     "job_object_unavailable": "the process could not be contained; it was stopped",
     "proxy_unavailable": "the local egress proxy could not start; nothing was downloaded",
+    "extract_failed": "the page could not be turned into text; details were not printed",
+    "extract_engine_missing": "run opcos-runtime ensure for this repo; nothing was installed",
 }
 
 

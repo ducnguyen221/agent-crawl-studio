@@ -66,6 +66,7 @@ class Unresolved:
     """A stand-in egress proxy that let the CONNECT through but could not resolve the name (RF1): the engine only
     saw `502 Bad Gateway`, the proxy's own record says why."""
     over_cap = type("E", (), {"is_set": staticmethod(lambda: False)})()
+    bytes_in = 0
     denied = []
     failures = [("www.youtube.com", "dns_failed")]
     url = "http://%s:x@127.0.0.1:5" % ("ab" * 32)
@@ -85,6 +86,7 @@ def test_a_name_that_does_not_resolve_is_blocked_env(tmp_path):
 class Refusing:
     """A stand-in egress proxy that refused the input host (FR13.10)."""
     over_cap = type("E", (), {"is_set": staticmethod(lambda: False)})()
+    bytes_in = 0
     denied = [("www.youtube.com", "ip_not_public")]
     url = "http://%s:x@127.0.0.1:5" % ("ab" * 32)
 

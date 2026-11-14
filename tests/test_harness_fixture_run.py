@@ -31,9 +31,9 @@ def venv_python():
     return last[0] if done.returncode == 0 and os.path.exists(last[0]) else None
 
 
-def run_harness(python, work):
+def run_harness(python, work, *extra):
     env = dict(os.environ, PYTHONPATH=str(ROOT / "src"), PYTHONDONTWRITEBYTECODE="1")
-    return subprocess.run([python, "-X", "utf8", str(HARNESS), "--work", str(work)], capture_output=True, text=True,
+    return subprocess.run([python, "-X", "utf8", str(HARNESS), "--work", str(work), *extra], capture_output=True, text=True,
                           encoding="utf-8", env=env, timeout=180, stdin=subprocess.DEVNULL)
 
 
@@ -56,3 +56,18 @@ def test_the_harness_runs_a_batch_with_the_core_venv_python(tmp_path):
     if python is None:
         pytest.skip("BLOCKED_ENV: the core venv is not installed on this machine")
     check(run_harness(python, tmp_path / "work"), tmp_path / "work")
+
+
+def test_the_harness_runs_the_extract_mode_on_a_chosen_page_with_the_core_venv_python(tmp_path):
+    python = venv_python()
+    if python is None:
+        pytest.skip("BLOCKED_ENV: the core venv is not installed on this machine")
+    work = tmp_path / "work"
+    proc = run_harness(python, work, "--mode", "extract", "--page", "vi-utf8.html")
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    result = json.loads(proc.stdout.splitlines()[-1])
+    item = result["items"][0]
+    assert result["status"] == "succeeded" and item["adapter"] == "extract"
+    assert [a["role"] for a in item["artifacts"]] == ["extract", "source"]
+    job = Path(work) / "jobs" / result["job_id"]
+    assert len(list((job / "files").iterdir())) == 2 and json.loads((job / "manifest.json").read_text(encoding="utf-8")) == result

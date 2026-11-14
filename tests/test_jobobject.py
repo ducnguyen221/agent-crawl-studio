@@ -31,9 +31,10 @@ def spawn(env=None):
 class FakeKernel:
     """The kernel32 calls of the wrapper, injected; `fail` names the call that raises."""
 
-    def __init__(self, fail=None, active=1):
+    def __init__(self, fail=None, active=1, peak=0):
         self.fail = fail
         self.active_count = active
+        self.peak = peak
         self.calls = []
 
     def _go(self, name, *args):
@@ -64,6 +65,16 @@ class FakeKernel:
 
     def close(self, handle):
         self._go("close", handle)
+
+    def set_limits(self, job, memory_bytes, active_processes):
+        self._go("set_limits", job, memory_bytes, active_processes)
+
+    def resume(self, process):
+        self._go("resume", process)
+
+    def peak_memory(self, job):
+        self._go("peak_memory", job)
+        return self.peak
 
     def names(self):
         return [call[0] for call in self.calls]
@@ -399,3 +410,70 @@ def test_repeated_interrupts_while_waiting_for_the_helper_do_not_shorten_the_wai
 
 def test_a_core_job_that_cannot_even_be_made_is_only_a_missing_net():
     assert jobobject.ensure_core_job(FakeKernel(fail="create_job"), force=True) is None
+
+
+# ------------------------------------------------------------- SPR-04 TK5: limits, resume, peak, the core net state
+
+def test_set_limits_goes_through_the_kernel_with_both_numbers():
+    kernel = FakeKernel()
+    job = jobobject.JobObject(kernel=kernel)
+    job.set_limits(jobobject.JobLimits(memory_bytes=1000, active_processes=3))
+    assert ("set_limits", "J", 1000, 3) in kernel.calls
+    job.set_limits(None)  # nothing to set: no call
+    assert kernel.names().count("set_limits") == 1
+
+
+def test_resume_opens_the_process_resumes_it_and_closes_the_handle():
+    kernel = FakeKernel()
+    job = jobobject.JobObject(kernel=kernel)
+    job.resume(4242)
+    assert kernel.names()[-3:] == ["open_process", "resume", "close"] and ("resume", "P") in kernel.calls
+
+
+def test_resume_closes_its_handle_when_the_resume_fails():
+    kernel = FakeKernel(fail="resume")
+    job = jobobject.JobObject(kernel=kernel)
+    with pytest.raises(jobobject.JobObjectError):
+        job.resume(4242)
+    assert kernel.names()[-1] == "close"
+
+
+def test_memory_limit_hit_is_strictly_peak_over_limit():
+    kernel = FakeKernel(peak=1000)
+    job = jobobject.JobObject(kernel=kernel)
+    assert job.memory_limit_hit() is False  # no limit set: never a hit
+    job.set_limits(jobobject.JobLimits(memory_bytes=1000))
+    assert job.peak_memory() == 1000 and job.memory_limit_hit() is False  # equal to the limit is not over it
+    kernel.peak = 1001
+    assert job.memory_limit_hit() is True
+
+
+def test_memory_limit_hit_on_a_closed_job_refuses():
+    job = jobobject.JobObject(kernel=FakeKernel())
+    job.close()
+    with pytest.raises(jobobject.JobObjectError):
+        job.peak_memory()
+
+
+@pytest.mark.parametrize("call,args", [("set_limits", (1, 1, 1)), ("resume", (1,)), ("peak_memory", (1,))])
+def test_the_new_kernel_calls_raise_job_object_error_when_they_fail(dead_kernel, call, args):
+    with pytest.raises(jobobject.JobObjectError):
+        getattr(dead_kernel, call)(*args)
+
+
+def test_the_core_net_state_is_true_unless_a_real_attempt_failed(monkeypatch):
+    monkeypatch.setattr(jobobject, "_CORE_TRIED", False)
+    monkeypatch.setattr(jobobject, "_CORE_FAILED", False)
+    monkeypatch.setattr(jobobject, "_CORE", None)
+    assert jobobject.core_job_state() is True  # not tried yet: nothing is missing
+    assert jobobject.ensure_core_job(FakeKernel(fail="assign")) is None
+    assert jobobject.core_job_state() is False
+    assert jobobject.ensure_core_job(FakeKernel(fail="assign"), force=True) is None  # a forced probe changes nothing
+    assert jobobject.core_job_state() is False
+
+
+def test_a_forced_probe_never_marks_the_net_as_missing(monkeypatch):
+    monkeypatch.setattr(jobobject, "_CORE_TRIED", False)
+    monkeypatch.setattr(jobobject, "_CORE_FAILED", False)
+    assert jobobject.ensure_core_job(FakeKernel(fail="assign"), force=True) is None
+    assert jobobject.core_job_state() is True

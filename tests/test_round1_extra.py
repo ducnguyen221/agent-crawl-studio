@@ -11,7 +11,7 @@ from agent_crawl_studio import capabilities, flags
 
 FFMPEG = r"C:\tools\ffmpeg\bin\ffmpeg.exe"
 NODE = r"C:\Program Files\nodejs\node.exe"
-VERSIONS = {"yt-dlp": "2026.10.26", "httpx": "0.28.1"}
+VERSIONS = {"yt-dlp": "2026.10.26", "httpx": "0.28.1", "trafilatura": "2.3.1"}
 ENV = {"OPCOS_ROOT": r"C:\o", "CRAWL_STUDIO_WORK": r"C:\w"}
 
 
