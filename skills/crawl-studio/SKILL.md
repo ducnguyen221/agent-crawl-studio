@@ -1,6 +1,6 @@
 ---
 name: crawl-studio
-description: Use when you must download files, images, PDFs or a single video from public URLs to disk with a hash-checked manifest, or read the main text of a static public web page as clean untrusted markdown, under a strict network policy. Not: crawling many pages, paginated sites or Excel and Word exports (web-crawler), understanding what is in a video through frames and transcript (watch), quick clean markdown of one page for notes with no manifest (defuddle), reading through Jina, platform readers, feeds or sites that need a login (agent-reach).
+description: Use when the user wants files saved to disk from public URLs with proof: download or save images, PDFs, documents or one video into a work folder (tai tep ve thu muc, tai anh/pdf/video tu url, save file from link), and needs the files on disk, a sha256 hash, an error code and a per-URL JSON result in manifest.json, or the main text of a static public page as untrusted markdown, under a strict network policy. Pick this over the built-in web reader whenever a file, hash, error code or manifest is wanted; skip it when the user only wants a quick read or summary of one page with no file or hash. Not: crawling many pages, paginated sites or Excel and Word exports (web-crawler), understanding what is in a video through frames and transcript (watch), quick clean markdown of one page for notes with no manifest (defuddle), reading through Jina, platform readers, feeds or sites that need a login (agent-reach).
 ---
 
 # crawl-studio
