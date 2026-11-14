@@ -77,7 +77,7 @@ class ScaffoldTests(unittest.TestCase):
             if rel.endswith("marketplace.json"):
                 data = data["plugins"][0]
             versions.add(data["version"])
-        self.assertEqual(versions, {"0.2.1"})
+        self.assertEqual(versions, {"0.2.2"})
 
 
 if __name__ == "__main__":
